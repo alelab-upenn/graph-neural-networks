@@ -26,7 +26,7 @@ A graph neural network is an information processing architecture that regularize
 
 where the linear operators _H<sub>l</sub><sup>fg</sup>(S)_ represent __graph filters__ which are linear transforms that exploit the underlying graph structure (typically, by means of local exchanges only, and access to partial information). There are several choices of graph filters that give rise to different architectures (the most popular choice being the linear shift-invariant graph filters, which give rise to __graph convolutions__), many of which can be found in the ensuing library. The operation of pooling, and the extension of the activation functions to include local neighborhoods, can also be found in this library.
 
-## Code <a name="code"/>
+## Code <a class="anchor" id="code"></a>
 
 The library is written in [Python3](http://www.python.org/), drawing heavily from [numpy](http://www.numpy.org/), and with neural network models that are defined and trained within the [PyTorch](http://pytorch.org/) framework.
 
@@ -76,8 +76,20 @@ The libraries found here are split into two directories: <code>Modules/</code> a
 
 ### Architectures <a class="anchor" id="architectures"></a>
 
-In the library <code>Utils.graphML</code>, we can find several ways of parameterizing the filters _H<sub>l</sub><sup>fg</sup>(S)_.
+In what follows, we describe several ways of parameterizing the filters _H<sub>l</sub><sup>fg</sup>(S)_ that are implemented in this library.
 
-### Examples <a name="examples"/>
+* ___Convolutional Graph Neural Networks___. The most popular graph neural network (GNN) is that one that parameterizes _H<sub>l</sub><sup>fg</sup>(S)_ by a linear shift-invariant graph filter, giving rise to a __graph convolution__. The <code>nn.Module</code> subclass that implements the graph filter (convolutional) layer can be found in <code>Utils.graphML.GraphFilter</code>. This layer is the basic linear layer in the Selection GNN architecture (which also adds the pointwise activation function and the zero-padding pooling operation), which is already implemented in <code>Modules.architectures.SelectionGNN</code> and shown in several [examples](#examples). Whenever using the graph convolutional layer or its architecture counterpart, please cite the following paper
+
+F. Gama, A. G. Marques, G. Leus, and A. Ribeiro, "[Convolutional Neural Network Architectures for Signals Supported on Graphs](https://ieeexplore.ieee.org/document/8579589)," _IEEE Trans. Signal Process._, vol. 67, no. 4, pp. 1034–1049, Feb. 2019.
+
+The <code>Modules.architectures.SelectionGNN</code> also has a flag called <code>coarsening</code> that allows for the pooling to be done in terms of graph coarsening, following the Graclus algorithm. This part of the code was mainly adapted to PyTorch from this repository. Whenever using the <code>SelectionGNN</code> with graph coarsening pooling, please cite the following paper
+
+M. Defferrard, X. Bresson, and P. Vandergheynst, "[Convolutional Neural Networks on Graphs with Fast Localized Spectral Filtering](https://papers.nips.cc/paper/6081-convolutional-neural-networks-on-graphs-with-fast-localized-spectral-filtering.pdf),” in _30th Annu. Conf. Neural Inform. Process. Syst._ Barcelona, Spain: Neural Inform. Process. Foundation, 5-10 Dec. 2016, pp. 3844–3858.
+
+* ___Spectral Graph Neural Networks___. The spectral GNN is an early implementation of the convolutional GNN in the graph frequency domain. It does not scale to large graphs due to the cost of the eigendecomposition of the GSO. The spectral filtering layer is implemented as a <code>nn.Module</code> subclass in <code>Utils.graphML.SpectralGF</code> and the corresponding architecture with these linear layers, together with pointwise nonlinearities is implemented in <code>Modules.architectures.SpectralGNN</code>. Whenever using the spectral filtering layer and/or its architecture counterpart, please cite
+
+J. Bruna, W. Zaremba, A. Szlam, and Y. LeCun, "[Spectral networks and deep locally connected networks on graphs](https://openreview.net/forum?id=DQNsQf-UsoDBa)," in _Int. Conf. Learning Representations 2014_. Banff, AB: Assoc. Comput. Linguistics, 14-16 Apr. 2014, pp. 1–14.
+
+### Examples <a class="anchor" id="examples"/>
 
 ## Version <a class="anchor" id="version"></a>
