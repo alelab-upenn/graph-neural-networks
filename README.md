@@ -1,5 +1,5 @@
 # Graph Neural Networks
-This is a PyTorch library to implement graph neural networks. Any questions, comments or suggestions, please e-mail Fernando Gama at fgama@seas.upenn.edu. An in-depth tutorial on a source localization example can be found [here](tutorial.ipynb).
+This is a PyTorch library to implement graph neural networks. Any questions, comments or suggestions, please e-mail Fernando Gama at fgama@seas.upenn.edu and/or Luana Ruiz at rubruiz@seas.upenn.edu. An in-depth tutorial on a source localization example can be found [here](tutorial.ipynb).
 
 * [Introduction](#introduction)
 * [Code](#code)
