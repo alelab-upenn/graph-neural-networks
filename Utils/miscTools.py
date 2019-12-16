@@ -1,5 +1,6 @@
-# 2018/10/15~2018/07/12
+# 2018/10/15~
 # Fernando Gama, fgama@seas.upenn.edu.
+# Luana Ruiz, rubruiz@seas.upenn.edu.
 """
 miscTools Miscellaneous Tools module
 

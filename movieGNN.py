@@ -1,17 +1,8 @@
-# 2019/04/10~2018/07/12
+# 2019/04/10~
 # Fernando Gama, fgama@seas.upenn.edu
+# Luana Ruiz, rubruiz@seas.upenn.edu
 
-# Test the movie recommendation dataset on several architectures. The objective
-# is to test our ability to predict a given user's rating of a single movie,
-# given their ratings of other movies.
-# The loss function is a cross entropy loss (since there are only 5 ratings, 
-# from 1 to 5, that we consider to be classes), but the evaluation is using the
-# RMSE.
-# We test the following architectures
-#   - Selection GNN (with 2 layers to show zero-padding pooling, with
-#       nodes order by degree, EDS and Spectral Proxies, and also with graph
-#       coarsening)
-#   - Spectral GNN (with 2 layers, no pooling)
+# Test the movie recommendation dataset on several architectures.
 
 # When it runs, it produces the following output:
 #   - It trains the specified models and saves the best and the last model
@@ -26,13 +17,12 @@
 #       are saved in a logsTB directory.
 #   - If desired, saves the vector variables of each realization (training and
 #       validation loss and evaluation measure, respectively); this is saved
-#       both in pickle and in Matlab(R) format. These variables are saved in a
-#       trainVars directory.
+#       in pickle format. These variables are saved in a trainVars directory.
 #   - If desired, plots the training and validation loss and evaluation
 #       performance for each of the models, together with the training loss and
 #       validation evaluation performance for all models. The summarizing
-#       variables used to construct the plots are also saved in both pickle and
-#       Matlab(R) format. These plots (and variables) are in a figs directory.
+#       variables used to construct the plots are also saved in pickle format. 
+#       These plots (and variables) are in a figs directory.
 
 #%%##################################################################
 #                                                                   #
@@ -49,7 +39,6 @@ matplotlib.rcParams['font.family'] = 'serif'
 import matplotlib.pyplot as plt
 import pickle
 import datetime
-from scipy.io import savemat
 from copy import deepcopy
 
 import torch; torch.set_default_dtype(torch.float64)
@@ -63,6 +52,7 @@ import Utils.graphML as gml
 import Modules.architectures as archit
 import Modules.model as model
 import Modules.train as train
+import Modules.loss as loss
 
 #\\\ Separate functions:
 from Utils.miscTools import writeVarValues
@@ -74,7 +64,18 @@ from Utils.miscTools import saveSeed
 #                                                                   #
 #####################################################################
 
-labelID = 1 # Which node to focus on
+graphType = 'movie' # Graph type: 'user'-based or 'movie'-based
+labelID = [50] # Which node to focus on (either a list or the str 'all')
+# When 'movie': [1]: Toy Story, [50]: Star Wars, [258]: Contact,
+# [100]: Fargo, [180]: Return of the Jedi, [294]: Liar, liar
+if labelID == 'all':
+    labelIDstr = 'all'
+elif len(labelID) == 1:
+    labelIDstr = '%03d' % labelID[0]
+else:
+    labelIDstr = ['%03d_' % i for i in labelID]
+    labelIDstr = "".join(labelIDstr)
+    labelIDstr = labelIDstr[0:-1]
 thisFilename = 'movieGNN' # This is the general name of all related files
 
 saveDirRoot = 'experiments' # In this case, relative location
@@ -87,7 +88,7 @@ dataDir = os.path.join('datasets','movielens')
 today = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 # Append date and time of the run to the directory, to avoid several runs of
 # overwritting each other.
-saveDir = saveDir + '-' + '%03d' % labelID + '-' + today
+saveDir = saveDir + '-' + graphType + '-' + labelIDstr + '-' + today
 # Create directory 
 if not os.path.exists(saveDir):
     os.makedirs(saveDir)
@@ -121,7 +122,6 @@ saveSeed(randomStates, saveDir)
 
 useGPU = True # If true, and GPU is available, use it.
 
-graphType = 'movie' # Graph type: 'user'-based or 'movie'-based
 ratioTrain = 0.9 # Ratio of training samples
 ratioValid = 0.1 # Ratio of validation samples (out of the total training
 # samples)
@@ -130,22 +130,22 @@ ratioValid = 0.1 # Ratio of validation samples (out of the total training
 #   nTrain = round((1 - ratioValid) * ratioTrain * nTotal)
 #   nTest = nTotal - nTrain - nValidation
 
-nDataSplits = 10 # Number of data realizations
+nDataSplits = 1 # Number of data realizations
 # Obs.: The built graph depends on the split between training, validation and
 # testing. Therefore, we will run several of these splits and average across
 # them, to obtain some result that is more robust to this split.
-
-nClasses = 5 # Number of classes
     
 # Given that we build the graph from a training split selected at random, it
 # could happen that it is disconnected, or directed, or what not. In other 
 # words, we might want to force (by removing nodes) some useful characteristics
 # on the graph
 keepIsolatedNodes = False # If True keeps isolated nodes
-forceUndirected = False # If True forces the graph to be undirected
+forceUndirected = True # If True forces the graph to be undirected
 forceConnected = True # If True returns the largest connected component of the
     # graph as the main graph
-kNN = 40 # Number of nearest neighbors
+kNN = 10 # Number of nearest neighbors
+
+maxDataPoints = None # None to consider all data points
 
 #\\\ Save values:
 writeVarValues(varsFile,
@@ -154,11 +154,11 @@ writeVarValues(varsFile,
                 'ratioTrain': ratioTrain,
                 'ratioValid': ratioValid,
                 'nDataSplits': nDataSplits,
-                'nClasses': nClasses,
                 'keepIsolatedNodes': keepIsolatedNodes,
                 'forceUndirected': forceUndirected,
                 'forceConnected': forceConnected,
                 'kNN': kNN,
+                'maxDataPoints': maxDataPoints,
                 'useGPU': useGPU})
 
 ############
@@ -172,10 +172,14 @@ beta1 = 0.9 # beta1 if 'ADAM', alpha if 'RMSprop'
 beta2 = 0.999 # ADAM option only
 
 #\\\ Loss function choice
-lossFunction = nn.CrossEntropyLoss()
+lossFunction = nn.SmoothL1Loss
+minRatings = 0 # Discard samples (rows and columns) with less than minRatings 
+    # ratings
+interpolateRatings = False # Interpolate ratings with nearest-neighbors rule
+    # before feeding them into the GNN
 
 #\\\ Overall training options
-nEpochs = 80 # Number of epochs
+nEpochs = 40 # Number of epochs
 batchSize = 5 # Batch size
 doLearningRateDecay = False # Learning rate decay
 learningRateDecayRate = 0.9 # Rate
@@ -189,6 +193,8 @@ writeVarValues(varsFile,
                 'beta1': beta1,
                 'beta2': beta2,
                 'lossFunction': lossFunction,
+                'minRatings': minRatings,
+                'interpolateRatings': interpolateRatings,
                 'nEpochs': nEpochs,
                 'batchSize': batchSize,
                 'doLearningRateDecay': doLearningRateDecay,
@@ -199,23 +205,32 @@ writeVarValues(varsFile,
 #################
 # ARCHITECTURES #
 #################
-    
-# Select pooling options (node ordering for zero-padding)
-doDegree = True
-doSpectralProxies = True
-doEDS = True
-doCoarsening = True
 
+# Just four architecture one- and two-layered Selection and Local GNN. The main
+# difference is that the Local GNN is entirely local (i.e. the output is given
+# by a linear combination of the features at a single node, instead of a final
+# MLP layer combining the features at all nodes).
+    
 # Select desired architectures
 doSelectionGNN = True
-doSpectralGNN = True
+doLocalGNN = True
+
+do1Layer = True
+do2Layers = True
 
 # In this section, we determine the (hyper)parameters of models that we are
 # going to train. This only sets the parameters. The architectures need to be
-# created later below. That is, any new architecture in this part, needs also
-# to be coded later on. This is just to be easy to change the parameters once
-# the architecture is created. Do not forget to add the name of the architecture
+# created later below. Do not forget to add the name of the architecture
 # to modelList.
+
+# If the hyperparameter dictionary is called 'hParams' + name, then it can be
+# picked up immediately later on, and there's no need to recode anything after
+# the section 'Setup' (except for setting the number of nodes in the 'N' 
+# variable after it has been coded).
+
+# The name of the keys in the hyperparameter dictionary have to be the same
+# as the names of the variables in the architecture call, because they will
+# be called by unpacking the dictionary.
 
 modelList = []
 
@@ -228,102 +243,119 @@ if doSelectionGNN:
     #\\\ Basic parameters for all the Selection GNN architectures
     
     hParamsSelGNN = {} # Hyperparameters (hParams) for the Selection GNN (SelGNN)
-    hParamsSelGNN['F'] = [1, 64, 32] # Features per layer
-    hParamsSelGNN['K'] = [5, 5] # Number of filter taps per layer
+    
+    hParamsSelGNN['name'] = 'SelGNN'
+    # Chosen architecture
+    hParamsSelGNN['archit'] = archit.SelectionGNN
+    
+    # Graph convolutional parameters
+    hParamsSelGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
+    hParamsSelGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
     hParamsSelGNN['bias'] = True # Decide whether to include a bias term
-    hParamsSelGNN['sigma'] = nn.ReLU # Selected nonlinearity
-    hParamsSelGNN['N'] = [10, 5] # Number of nodes to keep at the end of
-        # each layer
-    hParamsSelGNN['rho'] = gml.MaxPoolLocal # Summarizing function
-    hParamsSelGNN['alpha'] = [2, 2] # alpha-hop neighborhood that
+    # Nonlinearity
+    hParamsSelGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
+    # Pooling
+    hParamsSelGNN['poolingFunction'] = gml.NoPool # Summarizing function
+    hParamsSelGNN['nSelectedNodes'] = None # To be determined later on
+    hParamsSelGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
         # is affected by the summary
-    hParamsSelGNN['dimLayersMLP'] = [nClasses] # Dimension of the fully
-        # connected layers after the GCN layers
+    # Full MLP readout layer (this layer breaks the locality of the solution)
+    hParamsSelGNN['dimLayersMLP'] = [1] # Dimension of the fully connected
+        # layers after the GCN layers, we just need to output a single scalar
+    # Graph structure
+    hParamsSelGNN['GSO'] = None # To be determined later on, based on data
+    hParamsSelGNN['order'] = None # Not used because there is no pooling
 
 #\\\\\\\\\\\\
-#\\\ MODEL 1: Selection GNN ordered by Degree
+#\\\ MODEL 1: Selection GNN with 1 less layer
 #\\\\\\\\\\\\
 
-if doSelectionGNN and doDegree:
+    hParamsSelGNN1Ly = deepcopy(hParamsSelGNN)
 
-    hParamsSelGNNdeg = deepcopy(hParamsSelGNN)
-
-    hParamsSelGNNdeg['name'] = 'SelGNNdeg' # Name of the architecture
+    hParamsSelGNN1Ly['name'] += '1Ly' # Name of the architecture
+    
+    hParamsSelGNN1Ly['dimNodeSignals'] = hParamsSelGNN['dimNodeSignals'][0:-1]
+    hParamsSelGNN1Ly['nFilterTaps'] = hParamsSelGNN['nFilterTaps'][0:-1]
+    hParamsSelGNN1Ly['poolingSize'] = hParamsSelGNN['poolingSize'][0:-1]
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNdeg)
-    modelList += [hParamsSelGNNdeg['name']]
+    writeVarValues(varsFile, hParamsSelGNN1Ly)
+    modelList += [hParamsSelGNN1Ly['name']]
     
 #\\\\\\\\\\\\
-#\\\ MODEL 2: Selection GNN ordered by EDS
+#\\\ MODEL 2: Selection GNN with all Layers
 #\\\\\\\\\\\\
 
-if doSelectionGNN and doEDS:
+    hParamsSelGNN2Ly = deepcopy(hParamsSelGNN)
 
-    hParamsSelGNNeds = deepcopy(hParamsSelGNN)
-
-    hParamsSelGNNeds['name'] = 'SelGNNeds' # Name of the architecture
+    hParamsSelGNN2Ly['name'] += '2Ly' # Name of the architecture
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNeds)
-    modelList += [hParamsSelGNNeds['name']]
-    
-#\\\\\\\\\\\\
-#\\\ MODEL 3: Selection GNN ordered by Spectral Proxies
-#\\\\\\\\\\\\
+    writeVarValues(varsFile, hParamsSelGNN2Ly)
+    modelList += [hParamsSelGNN2Ly['name']]
 
-if doSelectionGNN and doSpectralProxies:
-
-    hParamsSelGNNspr = deepcopy(hParamsSelGNN)
-
-    hParamsSelGNNspr['name'] = 'SelGNNspr' # Name of the architecture
-
-    #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNspr)
-    modelList += [hParamsSelGNNspr['name']]
     
-#\\\\\\\\\\\\
-#\\\ MODEL 4: Selection GNN with graph coarsening
-#\\\\\\\\\\\\
+#\\\\\\\\\\\\\\\\\
+#\\\ LOCAL GNN \\\
+#\\\\\\\\\\\\\\\\\
 
-if doSelectionGNN and doCoarsening:
+if doLocalGNN:
 
-    hParamsSelGNNcrs = deepcopy(hParamsSelGNN)
-
-    hParamsSelGNNcrs['name'] = 'SelGNNcrs' # Name of the architecture
-    hParamsSelGNNcrs['rho'] = nn.MaxPool1d
-
-    #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNcrs)
-    modelList += [hParamsSelGNNcrs['name']]
+    #\\\ Basic parameters for all the Local GNN architectures
     
-#\\\\\\\\\\\\\\\\\\\\
-#\\\ SPECTRAL GNN \\\
-#\\\\\\\\\\\\\\\\\\\\
+    hParamsLclGNN = {} # Hyperparameters (hParams) for the Local GNN (LclGNN)
     
-#\\\\\\\\\\\\
-#\\\ MODEL 5: Spectral GNN with no pooling
-#\\\\\\\\\\\\
+    hParamsLclGNN['name'] = 'LclGNN'
+    # Chosen architecture
+    hParamsLclGNN['archit'] = archit.LocalGNN
     
-if doSpectralGNN:
-    
-    hParamsSpctrlGNN = {}
-    
-    hParamsSpctrlGNN['name'] = 'SpctrlGNN' # Name of the architecture
-    
-    hParamsSpctrlGNN['F'] = [1, 64, 32] # Features per layer
-    hParamsSpctrlGNN['M'] = [5, 5] # Number of filter taps per layer
-    hParamsSpctrlGNN['bias'] = True # Decide whether to include a bias term
-    hParamsSpctrlGNN['sigma'] = nn.ReLU # Selected nonlinearity
-    hParamsSpctrlGNN['rho'] = gml.NoPool # Summarizing function
-    hParamsSpctrlGNN['alpha'] = [1, 1] # alpha-hop neighborhood that
+    # Graph convolutional parameters
+    hParamsLclGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
+    hParamsLclGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
+    hParamsLclGNN['bias'] = True # Decide whether to include a bias term
+    # Nonlinearity
+    hParamsLclGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
+    # Pooling
+    hParamsLclGNN['poolingFunction'] = gml.NoPool # Summarizing function
+    hParamsLclGNN['nSelectedNodes'] = None # To be determined later on
+    hParamsLclGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
         # is affected by the summary
-    hParamsSpctrlGNN['dimLayersMLP'] = [nClasses] # Dimension of the fully
-        # connected layers after the GCN layers
-        
+    # Readout layer: local linear combination of features
+    hParamsLclGNN['dimReadout'] = [1] # Dimension of the fully connected layers
+        # after the GCN layers (map); this fully connected layer is applied only
+        # at each node, without any further exchanges nor considering all nodes
+        # at once, making the architecture entirely local.
+    # Graph structure
+    hParamsLclGNN['GSO'] = None # To be determined later on, based on data
+    hParamsLclGNN['order'] = None # Not used because there is no pooling
+
+#\\\\\\\\\\\\
+#\\\ MODEL 3: Local GNN with 1 less layer
+#\\\\\\\\\\\\
+
+    hParamsLclGNN1Ly = deepcopy(hParamsLclGNN)
+
+    hParamsLclGNN1Ly['name'] += '1Ly' # Name of the architecture
+    
+    hParamsLclGNN1Ly['dimNodeSignals'] = hParamsLclGNN['dimNodeSignals'][0:-1]
+    hParamsLclGNN1Ly['nFilterTaps'] = hParamsLclGNN['nFilterTaps'][0:-1]
+    hParamsLclGNN1Ly['poolingSize'] = hParamsLclGNN['poolingSize'][0:-1]
+
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSpctrlGNN)
-    modelList += [hParamsSpctrlGNN['name']]
+    writeVarValues(varsFile, hParamsLclGNN1Ly)
+    modelList += [hParamsLclGNN1Ly['name']]
+    
+#\\\\\\\\\\\\
+#\\\ MODEL 4: Local GNN with all Layers
+#\\\\\\\\\\\\
+
+    hParamsLclGNN2Ly = deepcopy(hParamsLclGNN)
+
+    hParamsLclGNN2Ly['name'] += '2Ly' # Name of the architecture
+
+    #\\\ Save Values:
+    writeVarValues(varsFile, hParamsLclGNN2Ly)
+    modelList += [hParamsLclGNN2Ly['name']]
 
 ###########
 # LOGGING #
@@ -337,9 +369,9 @@ doFigs = True # Plot some figures (this only works if doSaveVars is True)
 # Parameters:
 printInterval = 0 # After how many training steps, print the partial results
 #   0 means to never print partial results while training
-xAxisMultiplierTrain = 10 # How many training steps in between those shown in
+xAxisMultiplierTrain = 100 # How many training steps in between those shown in
     # the plot, i.e., one training step every xAxisMultiplierTrain is shown.
-xAxisMultiplierValid = 2 # How many validation steps in between those shown,
+xAxisMultiplierValid = 20 # How many validation steps in between those shown,
     # same as above.
 figSize = 5 # Overall size of the figure that contains the plot
 lineWidth = 2 # Width of the plot lines
@@ -447,7 +479,10 @@ for split in range(nDataSplits):
     #   Load the data, which will give a specific split
     data = Utils.dataTools.MovieLens(graphType, labelID, ratioTrain, ratioValid,
                                      dataDir, keepIsolatedNodes,
-                                     forceUndirected, forceConnected, kNN)
+                                     forceUndirected, forceConnected, kNN,
+                                     maxDataPoints = maxDataPoints,
+                                     minRatings = minRatings,
+                                     interpolate = interpolateRatings)
     
     if doPrint:
         print("OK")
@@ -470,9 +505,11 @@ for split in range(nDataSplits):
     nNodes = G.N
 
     # Once data is completely formatted and in appropriate fashion, change its
-    # type to torch and move it to the appropriate device
+    # type to torch
     data.astype(torch.float64)
-    data.to(device)
+    # data.to(device)
+    # And the corresponding feature dimension that we will need to use
+    data.expandDims()
     
     if doPrint:
         print("OK")
@@ -482,10 +519,6 @@ for split in range(nDataSplits):
     #                    MODELS INITIALIZATION                          #
     #                                                                   #
     #####################################################################
-    
-    if doSpectralGNN:
-        hParamsSpctrlGNN['N'] = [nNodes, nNodes] # When no pooling is used, this 
-            # have to be the same
 
     # This is the dictionary where we store the models (in a model.Model
     # class, that is then passed to training).
@@ -495,392 +528,29 @@ for split in range(nDataSplits):
     
     if doPrint:
         print("Model initialization...", flush = True)
-
-    #%%\\\\\\\\\\
-    #\\\ MODEL 1: Selection GNN ordered by Degree
-    #\\\\\\\\\\\\
-    
-    if doSelectionGNN and doDegree:
-
-        thisName = hParamsSelGNNdeg['name']
-
-        if nDataSplits > 1:
-            thisName += 'G%02d' % split
-            
-        if doPrint:
-            print("\tInitializing %s..." % thisName, end = ' ', flush = True)
-
-        ##############
-        # PARAMETERS #
-        ##############
-
-        #\\\ Optimizer options
-        #   (If different from the default ones, change here.)
-        thisTrainer = trainer
-        thisLearningRate = learningRate
-        thisBeta1 = beta1
-        thisBeta2 = beta2
-
-        #\\\ Ordering
-        S, order = graphTools.permDegree(G.S/np.max(np.real(G.E)))
-        # order is an np.array with the ordering of the nodes with respect
-        # to the original GSO (the original GSO is kept in G.S).
-
-        ################
-        # ARCHITECTURE #
-        ################
-
-        thisArchit = archit.SelectionGNN(# Graph filtering
-                                         hParamsSelGNNdeg['F'],
-                                         hParamsSelGNNdeg['K'],
-                                         hParamsSelGNNdeg['bias'],
-                                         # Nonlinearity
-                                         hParamsSelGNNdeg['sigma'],
-                                         # Pooling
-                                         hParamsSelGNNdeg['N'],
-                                         hParamsSelGNNdeg['rho'],
-                                         hParamsSelGNNdeg['alpha'],
-                                         # MLP
-                                         hParamsSelGNNdeg['dimLayersMLP'],
-                                         # Structure
-                                         S)
-        # This is necessary to move all the learnable parameters to be
-        # stored in the device (mostly, if it's a GPU)
-        thisArchit.to(device)
-
-        #############
-        # OPTIMIZER #
-        #############
-
-        if thisTrainer == 'ADAM':
-            thisOptim = optim.Adam(thisArchit.parameters(),
-                                   lr = learningRate, betas = (beta1,beta2))
-        elif thisTrainer == 'SGD':
-            thisOptim = optim.SGD(thisArchit.parameters(), lr=learningRate)
-        elif thisTrainer == 'RMSprop':
-            thisOptim = optim.RMSprop(thisArchit.parameters(),
-                                      lr = learningRate, alpha = beta1)
-
-        ########
-        # LOSS #
-        ########
-
-        thisLossFunction = lossFunction # (if different from default, change
-                                        # it here)
-
-        #########
-        # MODEL #
-        #########
-
-        SelGNNdeg = model.Model(thisArchit, thisLossFunction, thisOptim,
-                                thisName, saveDir, order)
-
-        modelsGNN[thisName] = SelGNNdeg
-
-        writeVarValues(varsFile,
-                       {'name': thisName,
-                        'thisTrainer': thisTrainer,
-                        'thisLearningRate': thisLearningRate,
-                        'thisBeta1': thisBeta1,
-                        'thisBeta2': thisBeta2})
-    
-        if doPrint:
-            print("OK")
-
-    #%%\\\\\\\\\\
-    #\\\ MODEL 2: Selection GNN ordered by EDS
-    #\\\\\\\\\\\\
-    
-    if doSelectionGNN and doEDS:
-
-        thisName = hParamsSelGNNeds['name']
-
-        if nDataSplits > 1:
-            thisName += 'G%02d' % split
-            
-        if doPrint:
-            print("\tInitializing %s..." % thisName, end = ' ', flush = True)
-
-        ##############
-        # PARAMETERS #
-        ##############
-
-        #\\\ Optimizer options
-        #   (If different from the default ones, change here.)
-        thisTrainer = trainer
-        thisLearningRate = learningRate
-        thisBeta1 = beta1
-        thisBeta2 = beta2
-
-        #\\\ Ordering
-        S, order = graphTools.permEDS(G.S/np.max(np.real(G.E)))
-        # order is an np.array with the ordering of the nodes with respect
-        # to the original GSO (the original GSO is kept in G.S).
-
-        ################
-        # ARCHITECTURE #
-        ################
-
-        thisArchit = archit.SelectionGNN(# Graph filtering
-                                         hParamsSelGNNeds['F'],
-                                         hParamsSelGNNeds['K'],
-                                         hParamsSelGNNeds['bias'],
-                                         # Nonlinearity
-                                         hParamsSelGNNeds['sigma'],
-                                         # Pooling
-                                         hParamsSelGNNeds['N'],
-                                         hParamsSelGNNeds['rho'],
-                                         hParamsSelGNNeds['alpha'],
-                                         # MLP
-                                         hParamsSelGNNeds['dimLayersMLP'],
-                                         # Structure
-                                         S)
-        # This is necessary to move all the learnable parameters to be
-        # stored in the device (mostly, if it's a GPU)
-        thisArchit.to(device)
-
-        #############
-        # OPTIMIZER #
-        #############
-
-        if thisTrainer == 'ADAM':
-            thisOptim = optim.Adam(thisArchit.parameters(),
-                                   lr = learningRate, betas = (beta1,beta2))
-        elif thisTrainer == 'SGD':
-            thisOptim = optim.SGD(thisArchit.parameters(), lr=learningRate)
-        elif thisTrainer == 'RMSprop':
-            thisOptim = optim.RMSprop(thisArchit.parameters(),
-                                      lr = learningRate, alpha = beta1)
-
-        ########
-        # LOSS #
-        ########
-
-        thisLossFunction = lossFunction # (if different from default, change
-                                        # it here)
-
-        #########
-        # MODEL #
-        #########
-
-        SelGNNeds = model.Model(thisArchit, thisLossFunction, thisOptim,
-                                thisName, saveDir, order)
-
-        modelsGNN[thisName] = SelGNNeds
-
-        writeVarValues(varsFile,
-                       {'name': thisName,
-                        'thisTrainer': thisTrainer,
-                        'thisLearningRate': thisLearningRate,
-                        'thisBeta1': thisBeta1,
-                        'thisBeta2': thisBeta2})
-    
-        if doPrint:
-            print("OK")
-
-    #%%\\\\\\\\\\
-    #\\\ MODEL 3: Selection GNN ordered by Spectral Proxies
-    #\\\\\\\\\\\\
-    
-    if doSelectionGNN and doSpectralProxies:
-
-        thisName = hParamsSelGNNspr['name']
-
-        if nDataSplits > 1:
-            thisName += 'G%02d' % split
-            
-        if doPrint:
-            print("\tInitializing %s..." % thisName, end = ' ', flush = True)
-
-        ##############
-        # PARAMETERS #
-        ##############
-
-        #\\\ Optimizer options
-        #   (If different from the default ones, change here.)
-        thisTrainer = trainer
-        thisLearningRate = learningRate
-        thisBeta1 = beta1
-        thisBeta2 = beta2
-
-        #\\\ Ordering
-        S, order = graphTools.permSpectralProxies(G.S/np.max(np.real(G.E)))
-        # order is an np.array with the ordering of the nodes with respect
-        # to the original GSO (the original GSO is kept in G.S).
-
-        ################
-        # ARCHITECTURE #
-        ################
-
-        thisArchit = archit.SelectionGNN(# Graph filtering
-                                         hParamsSelGNNspr['F'],
-                                         hParamsSelGNNspr['K'],
-                                         hParamsSelGNNspr['bias'],
-                                         # Nonlinearity
-                                         hParamsSelGNNspr['sigma'],
-                                         # Pooling
-                                         hParamsSelGNNspr['N'],
-                                         hParamsSelGNNspr['rho'],
-                                         hParamsSelGNNspr['alpha'],
-                                         # MLP
-                                         hParamsSelGNNspr['dimLayersMLP'],
-                                         # Structure
-                                         S)
-        # This is necessary to move all the learnable parameters to be
-        # stored in the device (mostly, if it's a GPU)
-        thisArchit.to(device)
-
-        #############
-        # OPTIMIZER #
-        #############
-
-        if thisTrainer == 'ADAM':
-            thisOptim = optim.Adam(thisArchit.parameters(),
-                                   lr = learningRate, betas = (beta1,beta2))
-        elif thisTrainer == 'SGD':
-            thisOptim = optim.SGD(thisArchit.parameters(), lr=learningRate)
-        elif thisTrainer == 'RMSprop':
-            thisOptim = optim.RMSprop(thisArchit.parameters(),
-                                      lr = learningRate, alpha = beta1)
-
-        ########
-        # LOSS #
-        ########
-
-        thisLossFunction = lossFunction # (if different from default, change
-                                        # it here)
-
-        #########
-        # MODEL #
-        #########
-
-        SelGNNspr = model.Model(thisArchit, thisLossFunction, thisOptim,
-                                thisName, saveDir, order)
-
-        modelsGNN[thisName] = SelGNNspr
-
-        writeVarValues(varsFile,
-                       {'name': thisName,
-                        'thisTrainer': thisTrainer,
-                        'thisLearningRate': thisLearningRate,
-                        'thisBeta1': thisBeta1,
-                        'thisBeta2': thisBeta2})
-    
-        if doPrint:
-            print("OK")
-
-    #%%\\\\\\\\\\
-    #\\\ MODEL 4: Selection GNN with graph coarsening
-    #\\\\\\\\\\\\
-    
-    if doSelectionGNN and doCoarsening:
-
-        thisName = hParamsSelGNNcrs['name']
-
-        if nDataSplits > 1:
-            thisName += 'G%02d' % split
-            
-        if doPrint:
-            print("\tInitializing %s..." % thisName, end = ' ', flush = True)
-
-        ##############
-        # PARAMETERS #
-        ##############
-
-        #\\\ Optimizer options
-        #   (If different from the default ones, change here.)
-        thisTrainer = trainer
-        thisLearningRate = learningRate
-        thisBeta1 = beta1
-        thisBeta2 = beta2
         
-        # Coarsening requires an undirected graph
-        S = G.S/np.max(np.real(G.E))
-        S = 0.5 * (S + S.T)
-        Segvl, _ = np.linalg.eig(S)
-        S = S/np.max(Segvl)
-
-        #\\\ Ordering
-        S, order = graphTools.permIdentity(S)
-        # order is an np.array with the ordering of the nodes with respect
-        # to the original GSO (the original GSO is kept in G.S).
-
-        ################
-        # ARCHITECTURE #
-        ################
-
-        thisArchit = archit.SelectionGNN(# Graph filtering
-                                         hParamsSelGNNcrs['F'],
-                                         hParamsSelGNNcrs['K'],
-                                         hParamsSelGNNcrs['bias'],
-                                         # Nonlinearity
-                                         hParamsSelGNNcrs['sigma'],
-                                         # Pooling
-                                         hParamsSelGNNcrs['N'],
-                                         hParamsSelGNNcrs['rho'],
-                                         hParamsSelGNNcrs['alpha'],
-                                         # MLP
-                                         hParamsSelGNNcrs['dimLayersMLP'],
-                                         # Structure
-                                         S,
-                                         coarsening = True)
-        # This is necessary to move all the learnable parameters to be
-        # stored in the device (mostly, if it's a GPU)
-        thisArchit.to(device)
-
-        #############
-        # OPTIMIZER #
-        #############
-
-        if thisTrainer == 'ADAM':
-            thisOptim = optim.Adam(thisArchit.parameters(),
-                                   lr = learningRate, betas = (beta1,beta2))
-        elif thisTrainer == 'SGD':
-            thisOptim = optim.SGD(thisArchit.parameters(), lr=learningRate)
-        elif thisTrainer == 'RMSprop':
-            thisOptim = optim.RMSprop(thisArchit.parameters(),
-                                      lr = learningRate, alpha = beta1)
-
-        ########
-        # LOSS #
-        ########
-
-        thisLossFunction = lossFunction # (if different from default, change
-                                        # it here)
-
-        #########
-        # MODEL #
-        #########
-
-        SelGNNcrs = model.Model(thisArchit, thisLossFunction, thisOptim,
-                                thisName, saveDir, order)
-
-        modelsGNN[thisName] = SelGNNcrs
-
-        writeVarValues(varsFile,
-                       {'name': thisName,
-                        'thisTrainer': thisTrainer,
-                        'thisLearningRate': thisLearningRate,
-                        'thisBeta1': thisBeta1,
-                        'thisBeta2': thisBeta2})
-    
-        if doPrint:
-            print("OK")
-
-    #%%\\\\\\\\\\
-    #\\\ MODEL 5: Spectral GNN with no pooling
-    #\\\\\\\\\\\\
-    
-    if doSpectralGNN:
-
-        thisName = hParamsSpctrlGNN['name']
-
+    for thisModel in modelList:
+        
+        # Get the corresponding parameter dictionary
+        hParamsDict = deepcopy(eval('hParams' + thisModel))
+        
+        # Now, this dictionary has all the hyperparameters that we need to pass
+        # to the architecture, but it also has the 'name' and 'archit' that
+        # we do not need to pass them. So we are going to get them out of
+        # the dictionary
+        thisName = hParamsDict.pop('name')
+        callArchit = hParamsDict.pop('archit')
+        
+        # If more than one graph or data realization is going to be carried out,
+        # we are going to store all of thos models separately, so that any of
+        # them can be brought back and studied in detail.
         if nDataSplits > 1:
             thisName += 'G%02d' % split
             
         if doPrint:
-            print("\tInitializing %s..." % thisName, end = ' ', flush = True)
-
+            print("\tInitializing %s..." % thisName,
+                  end = ' ',flush = True)
+            
         ##############
         # PARAMETERS #
         ##############
@@ -893,41 +563,33 @@ for split in range(nDataSplits):
         thisBeta2 = beta2
 
         #\\\ Ordering
-        S, order = graphTools.permIdentity(G.S/np.max(np.real(G.E)))
-        # order is an np.array with the ordering of the nodes with respect
-        # to the original GSO (the original GSO is kept in G.S).
-
+        S = G.S.copy()/np.max(np.real(G.E))
+        # Do not forget to add the GSO to the input parameters of the archit
+        hParamsDict['GSO'] = S
+        # Add the number of nodes for the no-pooling part
+        if '1Ly' in thisName:
+            hParamsDict['nSelectedNodes'] = [nNodes]
+        elif '2Ly' in thisName:
+            hParamsDict['nSelectedNodes'] = [nNodes, nNodes]
+        
         ################
         # ARCHITECTURE #
         ################
 
-        thisArchit = archit.SpectralGNN(# Graph filtering
-                                        hParamsSpctrlGNN['F'],
-                                        hParamsSpctrlGNN['M'],
-                                        hParamsSpctrlGNN['bias'],
-                                        # Nonlinearity
-                                        hParamsSpctrlGNN['sigma'],
-                                        # Pooling
-                                        hParamsSpctrlGNN['N'],
-                                        hParamsSpctrlGNN['rho'],
-                                        hParamsSpctrlGNN['alpha'],
-                                        # MLP
-                                        hParamsSpctrlGNN['dimLayersMLP'],
-                                        # Structure
-                                        S)
-        # This is necessary to move all the learnable parameters to be
-        # stored in the device (mostly, if it's a GPU)
+        thisArchit = callArchit(**hParamsDict)
         thisArchit.to(device)
-
+        
         #############
         # OPTIMIZER #
         #############
 
         if thisTrainer == 'ADAM':
             thisOptim = optim.Adam(thisArchit.parameters(),
-                                   lr = learningRate, betas = (beta1,beta2))
+                                   lr = learningRate,
+                                   betas = (beta1, beta2))
         elif thisTrainer == 'SGD':
-            thisOptim = optim.SGD(thisArchit.parameters(), lr=learningRate)
+            thisOptim = optim.SGD(thisArchit.parameters(),
+                                  lr = learningRate)
         elif thisTrainer == 'RMSprop':
             thisOptim = optim.RMSprop(thisArchit.parameters(),
                                       lr = learningRate, alpha = beta1)
@@ -936,17 +598,18 @@ for split in range(nDataSplits):
         # LOSS #
         ########
 
-        thisLossFunction = lossFunction # (if different from default, change
-                                        # it here)
+        thisLossFunction = loss.adaptExtraDimensionLoss(lossFunction)
 
         #########
         # MODEL #
         #########
 
-        SpctrlGNN = model.Model(thisArchit, thisLossFunction, thisOptim,
-                                thisName, saveDir, order)
+        modelCreated = model.Model(thisArchit,
+                                   thisLossFunction,
+                                   thisOptim,
+                                   thisName, saveDir)
 
-        modelsGNN[thisName] = SpctrlGNN
+        modelsGNN[thisName] = modelCreated
 
         writeVarValues(varsFile,
                        {'name': thisName,
@@ -954,7 +617,7 @@ for split in range(nDataSplits):
                         'thisLearningRate': thisLearningRate,
                         'thisBeta1': thisBeta1,
                         'thisBeta2': thisBeta2})
-    
+
         if doPrint:
             print("OK")
             
@@ -1001,22 +664,27 @@ for split in range(nDataSplits):
     ########
 
     xTest, yTest = data.getSamples('test')
+    xTest = xTest.to(device)
+    yTest = yTest.to(device)
 
     ##############
     # BEST MODEL #
     ##############
 
     if doPrint:
-        print("Total testing accuracy (Best):", flush = True)
+        print("Total testing RMSE (Best):", flush = True)
 
     for key in modelsGNN.keys():
-        # Update order and adapt dimensions (this data has one input feature,
-        # so we need to add that dimension)
-        xTestOrdered = xTest[:,modelsGNN[key].order].unsqueeze(1)
 
         with torch.no_grad():
             # Process the samples
-            yHatTest = modelsGNN[key].archit(xTestOrdered)
+            if 'singleNodeForward' in dir(modelsGNN[key].archit):
+                if 'getLabelID' in dir(data):
+                    targetIDs = data.getLabelID('test')
+                    yHatTest = modelsGNN[key].archit\
+                                            .singleNodeForward(xTest, targetIDs)
+            else:
+                yHatTest = modelsGNN[key].archit(xTest)
             # yHatTest is of shape
             #   testSize x numberOfClasses
             # We compute the accuracy
@@ -1041,6 +709,9 @@ for split in range(nDataSplits):
             # This is so that we can later compute a total accuracy with
             # the corresponding error.
 
+        del yHatTest
+        del thisAccBest
+
     ##############
     # LAST MODEL #
     ##############
@@ -1048,16 +719,21 @@ for split in range(nDataSplits):
     # And repeat for the last model
 
     if doPrint:
-        print("Total testing accuracy (Last):", flush = True)
+        print("Total testing RMSE (Last):", flush = True)
 
     # Update order and adapt dimensions
     for key in modelsGNN.keys():
         modelsGNN[key].load(label = 'Last')
-        xTestOrdered = xTest[:,modelsGNN[key].order].unsqueeze(1)
 
         with torch.no_grad():
             # Process the samples
-            yHatTest = modelsGNN[key].archit(xTestOrdered)
+            if 'singleNodeForward' in dir(modelsGNN[key].archit):
+                if 'getLabelID' in dir(data):
+                    targetIDs = data.getLabelID('test')
+                    yHatTest = modelsGNN[key].archit\
+                                     .singleNodeForward(xTest, targetIDs)
+            else:
+                yHatTest = modelsGNN[key].archit(xTest)
             # yHatTest is of shape
             #   testSize x numberOfClasses
             # We compute the accuracy
@@ -1074,13 +750,18 @@ for split in range(nDataSplits):
             if thisModel in key:
                 accLast[thisModel][split] = thisAccLast.item()
 
+        del yHatTest
+        del thisAccLast
+    
+    del yTest
+    del xTest
+
 ############################
 # FINAL EVALUATION RESULTS #
 ############################
 
 # Now that we have computed the accuracy of all runs, we can obtain a final
 # result (mean and standard deviation)
-
 
 meanAccBest = {} # Mean across data splits
 meanAccLast = {} # Mean across data splits
@@ -1250,21 +931,7 @@ if doFigs and doSaveVars:
     varsPickle['stdDevEvalValid'] = stdDevEvalValid
     with open(os.path.join(saveDirFigs,'figVars.pkl'), 'wb') as figVarsFile:
         pickle.dump(varsPickle, figVarsFile)
-    #   Matlab, second:
-    varsMatlab = {}
-    varsMatlab['nEpochs'] = nEpochs
-    varsMatlab['nBatches'] = nBatches
-    for thisModel in modelList:
-        varsMatlab['meanLossTrain' + thisModel] = meanLossTrain[thisModel]
-        varsMatlab['stdDevLossTrain' + thisModel] = stdDevLossTrain[thisModel]
-        varsMatlab['meanEvalTrain' + thisModel] = meanEvalTrain[thisModel]
-        varsMatlab['stdDevEvalTrain' + thisModel] = stdDevEvalTrain[thisModel]
-        varsMatlab['meanLossValid' + thisModel] = meanLossValid[thisModel]
-        varsMatlab['stdDevLossValid' + thisModel] = stdDevLossValid[thisModel]
-        varsMatlab['meanEvalValid' + thisModel] = meanEvalValid[thisModel]
-        varsMatlab['stdDevEvalValid' + thisModel] = stdDevEvalValid[thisModel]
-    savemat(os.path.join(saveDirFigs, 'figVars.mat'), varsMatlab)
-
+        
     ########
     # PLOT #
     ########
@@ -1320,7 +987,7 @@ if doFigs and doSaveVars:
         lossFig.savefig(os.path.join(saveDirFigs,'loss%s.pdf' % key),
                         bbox_inches = 'tight')
 
-    #\\\ ACCURACY (Training and validation) for EACH MODEL
+    #\\\ RMSE (Training and validation) for EACH MODEL
     for key in meanEvalTrain.keys():
         accFig = plt.figure(figsize=(1.61*figSize, 1*figSize))
         plt.errorbar(xTrain, meanEvalTrain[key], yerr = stdDevEvalTrain[key],
@@ -1329,7 +996,7 @@ if doFigs and doSaveVars:
         plt.errorbar(xValid, meanEvalValid[key], yerr = stdDevEvalValid[key],
                      color = '#95001A', linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
-        plt.ylabel(r'Accuracy')
+        plt.ylabel(r'RMSE')
         plt.xlabel(r'Training steps')
         plt.legend([r'Training', r'Validation'])
         plt.title(r'%s' % key)
@@ -1348,13 +1015,13 @@ if doFigs and doSaveVars:
     allLossTrain.savefig(os.path.join(saveDirFigs,'allLossTrain.pdf'),
                     bbox_inches = 'tight')
 
-    # ACCURACY (validation) for ALL MODELS
+    # RMSE (validation) for ALL MODELS
     allEvalValid = plt.figure(figsize=(1.61*figSize, 1*figSize))
     for key in meanEvalValid.keys():
         plt.errorbar(xValid, meanEvalValid[key], yerr = stdDevEvalValid[key],
                      linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
-    plt.ylabel(r'Accuracy')
+    plt.ylabel(r'RMSE')
     plt.xlabel(r'Training steps')
     plt.legend(list(meanEvalValid.keys()))
     allEvalValid.savefig(os.path.join(saveDirFigs,'allEvalValid.pdf'),

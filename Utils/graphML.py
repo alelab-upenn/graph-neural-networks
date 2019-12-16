@@ -1,5 +1,6 @@
-# 2018/11/01~2018/07/12
+# 2018/11/01~
 # Fernando Gama, fgama@seas.upenn.edu.
+# Luana Ruiz, rubruiz@seas.upenn.edu.
 """
 graphML.py Module for basic GSP and graph machine learning functions.
 
@@ -450,7 +451,7 @@ def EVGF(S, x, b=None):
     y = torch.sum(z, dim = 2)
     if b is not None:
         y = y + b
-    return y  
+    return y
 
 def learnAttentionGSO(x, a, W, S, negative_slope=0.2):
     """
@@ -682,16 +683,18 @@ class MaxLocalActivation(nn.Module):
         self.N = S.shape[1]
         assert S.shape[2] == self.N
         self.S = S
+        # Change tensor S to numpy now that we have saved it as tensor in self.S
+        S = S.cpu().numpy()
         # The neighborhood matrix has to be a tensor of shape
         #   nOutputNodes x maxNeighborhoodSize
         neighborhood = []
         maxNeighborhoodSizes = []
         for k in range(1,self.K+1):
             # For each hop (0,1,...) in the range K
-            thisNeighborhood = graphTools.computeNeighborhood(
-                            np.array(self.S), k, outputType='matrix')
+            thisNeighborhood = graphTools.computeNeighborhood(S, k,
+                                                            outputType='matrix')
             # compute the k-hop neighborhood
-            neighborhood.append(torch.tensor(thisNeighborhood))
+            neighborhood.append(torch.tensor(thisNeighborhood).to(self.S.device))
             maxNeighborhoodSizes.append(thisNeighborhood.shape[1])
         self.maxNeighborhoodSizes = maxNeighborhoodSizes
         self.neighborhood = neighborhood
@@ -747,7 +750,7 @@ class MaxLocalActivation(nn.Module):
                                                     1,
                                                     1])
             # And finally we're in position of getting all the neighbors in line
-            xNeighbors = torch.gather(x_aux, 2, gatherNeighbor.long())
+            xNeighbors=torch.gather(x_aux,2,gatherNeighbor.long().to(x.device))
             #   B x F x nOutput x maxNeighbor
             # Note that this gather function already reduces the dimension to
             # nOutputNodes.
@@ -835,13 +838,15 @@ class MedianLocalActivation(nn.Module):
         self.N = S.shape[1]
         assert S.shape[2] == self.N
         self.S = S
+        # Change tensor S to numpy now that we have saved it as tensor in self.S
+        S = S.cpu().numpy()
         # The neighborhood matrix has to be a tensor of shape
         #   nOutputNodes x maxNeighborhoodSize
         neighborhood = []
         for k in range(1,self.K+1):
             # For each hop (0,1,...) in the range K
-            thisNeighborhood = graphTools.computeNeighborhood(
-                            np.array(self.S), k, outputType='list')
+            thisNeighborhood = graphTools.computeNeighborhood(S, k,
+                                                              outputType='list')
             # compute the k-hop neighborhood
             neighborhood.append(thisNeighborhood)
         self.neighborhood = neighborhood
@@ -859,7 +864,7 @@ class MedianLocalActivation(nn.Module):
         for k in range(1,self.K+1):
             kHopNeighborhood = self.neighborhood[k-1] 
             # Fetching k-hop neighborhoods of all nodes
-            kHopMedian = torch.empty(0)
+            kHopMedian = torch.empty(0).to(x.device)
             # Initializing the vector that will contain the k-hop median for
             # every node
             for n in range(self.N):
@@ -873,7 +878,7 @@ class MedianLocalActivation(nn.Module):
                 gatherNode = nodeNeighborhood.reshape([1, 1, neighborhoodLen])
                 gatherNode = gatherNode.repeat([batchSize, dimNodeSignals, 1])
                 # Reshaping the node neighborhood for the gather operation
-                xNodeNeighbors = torch.gather(x, 2, gatherNode.long())
+                xNodeNeighbors=torch.gather(x,2,gatherNode.long().to(x.device))
                 # Gathering signal values in the node neighborhood
                 nodeMedian,_ = torch.median(xNodeNeighbors, dim = 2,
                                             keepdim=True)

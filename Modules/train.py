@@ -1,5 +1,6 @@
-# 2019/01/10~2018/07/12
+# 2019/01/10~
 # Fernando Gama, fgama@seas.upenn.edu
+# Luana Ruiz, rubruiz@seas.upenn.edu
 """
 train.py Training Module
 
@@ -13,8 +14,6 @@ import numpy as np
 import os
 import pickle
 import datetime
-
-from scipy.io import savemat
 
 def MultipleModels(modelsDict, data, nEpochs, batchSize,
         **kwargs):
@@ -103,6 +102,16 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
         doLogging = False
         # If there's no training happening, there's nothing to report about
         # training losses and stuff.
+            
+    # Get the device we're working on
+    device = None # Not set
+    for key in modelsDict.keys():
+        params = list(modelsDict[key].archit.parameters())
+        thisDevice = params[0].device
+        if device is None:
+            device = thisDevice
+        else:
+            assert device == thisDevice
 
 
     ###########################################
@@ -165,7 +174,8 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
         lossValidTB = {}
         evalValidTB = {}
 
-    # Training variables of interest
+    # Training variables of interest (to save in these dictionaries).
+    #   The key of each dictionary is the model name.
     if doSaveVars:
         lossTrain = {}
         evalTrain = {}
@@ -214,8 +224,11 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
             thisBatchIndices = idxEpoch[batchIndex[batch] : batchIndex[batch+1]]
             # Get the samples
             xTrain, yTrain = data.getSamples('train', thisBatchIndices)
-            xTrain = xTrain.unsqueeze(1) # To account for just F=1 feature
+            # Move samples to device
+            xTrain = xTrain.to(device)
+            yTrain = yTrain.to(device)
 
+            # Print if doPrint is selected and every printInterval iterations
             if doPrint and printInterval > 0:
                 if (epoch * nBatches + batch) % printInterval == 0:
                     trainPreamble = ''
@@ -227,9 +240,6 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                             trainPreamble, epoch+1, batch+1))
 
             for key in modelsDict.keys():
-
-                # Set the ordering
-                xTrainOrdered = xTrain[:,:,modelsDict[key].order] # B x F x N
                 
                 # Start measuring time
                 startTime = datetime.datetime.now()
@@ -238,7 +248,19 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                 modelsDict[key].archit.zero_grad()
 
                 # Obtain the output of the GNN
-                yHatTrain = modelsDict[key].archit(xTrainOrdered)
+                # If we are in local GNN where we want to compute the output
+                # at a single node, then we need to use that, instead of the
+                # conventional forward
+                if 'singleNodeForward' in dir(modelsDict[key].archit):
+                    # This, entails getting at which nodes we want to compute
+                    # the output
+                    if 'getLabelID' in dir(data):
+                        targetIDs = data.getLabelID('train', thisBatchIndices)
+                        yHatTrain = modelsDict[key].archit.singleNodeForward(
+                                                                     xTrain,
+                                                                     targetIDs)
+                else:
+                    yHatTrain = modelsDict[key].archit(xTrain)
 
                 # Compute loss
                 lossValueTrain = modelsDict[key].loss(yHatTrain, yTrain)
@@ -265,6 +287,7 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                 if doLogging:
                     lossTrainTB[key] = lossValueTrain.item()
                     evalTrainTB[key] = accTrain.item()
+
                 # Save values
                 if doSaveVars:
                     lossTrain[key] += [lossValueTrain.item()]
@@ -275,8 +298,15 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                 if doPrint and printInterval > 0:
                     if (epoch * nBatches + batch) % printInterval == 0:
                         print("\t(%s) %6.4f / %7.4f - %6.4fs" % (
-                                    key, accTrain, lossValueTrain.item(),
+                                    key, accTrain.item(), lossValueTrain.item(),
                                     timeElapsed))
+                        
+                # Get rid of intermediate variables to free, if necessary,
+                # CUDA space (Note that using .item() already detaches the
+                # scalar value and converts it into a float on CPU)
+                del yHatTrain
+                del lossValueTrain
+                del accTrain
 
             #\\\\\\\
             #\\\ TB LOGGING (for each batch)
@@ -305,7 +335,9 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
             if (epoch * nBatches + batch) % validationInterval == 0:
                 # Validation:
                 xValid, yValid = data.getSamples('valid')
-                xValid = xValid.unsqueeze(1) # Add the F dimension: B x F x N
+                # Move to device
+                xValid = xValid.to(device)
+                yValid = yValid.to(device)
 
                 if doPrint:
                     validPreamble = ''
@@ -317,8 +349,6 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                             validPreamble, epoch+1, batch+1))
 
                 for key in modelsDict.keys():
-                    # Set the ordering
-                    xValidOrdered = xValid[:,:,modelsDict[key].order] # BxFxN
                     
                     # Start measuring time
                     startTime = datetime.datetime.now()
@@ -328,7 +358,13 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                     # account to update the learnable parameters.
                     with torch.no_grad():
                         # Obtain the output of the GNN
-                        yHatValid = modelsDict[key].archit(xValidOrdered)
+                        if 'singleNodeForward' in dir(modelsDict[key].archit):
+                            if 'getLabelID' in dir(data):
+                                targetIDs = data.getLabelID('valid')
+                                yHatValid = modelsDict[key].archit\
+                                            .singleNodeForward(xValid,targetIDs)
+                        else:
+                            yHatValid = modelsDict[key].archit(xValid)
 
                         # Compute loss
                         lossValueValid = modelsDict[key].loss(yHatValid, yValid)
@@ -339,12 +375,13 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                         timeElapsed = abs(endTime - startTime).total_seconds()
 
                         # Compute accuracy:
-                        accValid = data.evaluate(yHatValid, yValid)
+                        accValid = data.evaluate(yHatValid.data, yValid)
 
                         # Logging values
                         if doLogging:
                             lossValidTB[key] = lossValueValid.item()
                             evalValidTB[key] = accValid.item()
+
                         # Save values
                         if doSaveVars:
                             lossValid[key] += [lossValueValid.item()]
@@ -368,12 +405,23 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
                         keyBest = []
                     else:
                         thisValidScore = accValid
-                        if thisValidScore > bestScore[key]:
+                        if thisValidScore < bestScore[key]:
                             bestScore[key] = thisValidScore
                             bestEpoch[key], bestBatch[key] = epoch, batch
                             if doPrint:
                                 keyBest += [key]
                             modelsDict[key].save(label = 'Best')
+                            
+                    # Get rid of intermediate variables to free, if necessary,
+                    # CUDA space (Note that using .item() already detaches the
+                    # scalar value and converts it into a float on CPU)
+                    del yHatValid
+                    #   These ones coming up next, are all scalar, so it would
+                    #   not make much of a difference to delete them now, but
+                    #   whatever (they might have gradients that could occupy
+                    #   a lot of space)
+                    del lossValueValid
+                    del accValid
 
                 if doPrint:
                     if len(keyBest) > 0:
@@ -407,8 +455,7 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
     #################
 
     if doSaveVars:
-        # We convert the lists into np.arrays to be handled by both Matlab(R)
-        # and matplotlib
+        # We convert the lists into np.arrays to be handled by matplotlib
         for key in modelsDict.keys():
             lossTrain[key] = np.array(lossTrain[key])
             evalTrain[key] = np.array(evalTrain[key])
@@ -420,14 +467,16 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
         if not os.path.exists(saveDir):
             os.makedirs(saveDir)
         # Dictionaries of variables to save
-        varsMatlab = {}
         varsPickle = {}
-        # And let's start with pickle
+        # And save the relevant variables
         varsPickle['nEpochs'] = nEpochs
         varsPickle['nBatches'] = nBatches
         varsPickle['validationInterval'] = nBatches
         varsPickle['batchSize'] = np.array(batchSize)
         varsPickle['batchIndex'] = np.array(batchIndex)
+        varsPickle['bestBatch'] = bestBatch
+        varsPickle['bestEpoch'] = bestEpoch
+        varsPickle['bestScore'] = bestScore
         varsPickle['lossTrain'] = lossTrain
         varsPickle['evalTrain'] = evalTrain
         varsPickle['timeTrain'] = timeTrain
@@ -440,31 +489,14 @@ def MultipleModels(modelsDict, data, nEpochs, batchSize,
         if 'graphNo' in kwargs.keys():
             varsFilename += 'G%02d' % graphNo
             varsPickle['graphNo'] = graphNo
-            varsMatlab['graphNo'] = graphNo
         if 'realizationNo' in kwargs.keys():
             varsFilename += 'R%02d' % realizationNo
             varsPickle['realizationNo'] = realizationNo
-            varsMatlab['realizationNo'] = realizationNo
         # Create the file
         pathToFile = os.path.join(saveDir, varsFilename + '.pkl')
         # Open and save it
         with open(pathToFile, 'wb') as trainVarsFile:
             pickle.dump(varsPickle, trainVarsFile)
-        # And because of the SP background, why not save it in matlab too?
-        pathToMat = os.path.join(saveDir, varsFilename + '.mat')
-        varsMatlab['nEpochs'] = nEpochs
-        varsMatlab['nBatches'] = nBatches
-        varsMatlab['validationInterval'] = nBatches
-        varsMatlab['batchSize'] = np.array(batchSize)
-        varsMatlab['batchIndex'] = np.array(batchIndex)
-        for key in modelsDict.keys():
-            varsMatlab['lossTrain' + key] = lossTrain[key]
-            varsMatlab['evalTrain' + key] = evalTrain[key]
-            varsMatlab['timeTrain' + key] = timeTrain[key]
-            varsMatlab['lossValid' + key] = lossValid[key]
-            varsMatlab['evalValid' + key] = evalValid[key]
-            varsMatlab['timeValid' + key] = timeValid[key]
-        savemat(pathToMat, varsMatlab)
 
     # Now, if we didn't do any training (i.e. nEpochs = 0), then the last is
     # also the best.

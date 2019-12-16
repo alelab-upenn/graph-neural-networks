@@ -1,19 +1,30 @@
-# 2018/12/05~2018/07/12
+# 2018/12/05~
 # Fernando Gama, fgama@seas.upenn.edu
+# Luana Ruiz, rubruiz@seas.upenn.edu
 """
 architectures.py Architectures module
 
 Definition of GNN architectures.
 
 SelectionGNN: implements the selection GNN architecture
+LocalActivationGNN: implements the selection GNN architecture with a local
+    activation function (instead of pointwise)
+LocalGNN: implementes the selection GNN architecture by means of local
+    operations only
 SpectralGNN: implements the selection GNN architecture using spectral filters
 NodeVariantGNN: implements the selection GNN architecture with node-variant
     graph filters
 EdgeVariantGNN: implements the selection GNN architecture with edge-variant
     graph filters
+ARMAfilterGNN: implements the selection GNN architecture using ARMA graph
+    filters by Jacobi's method
 AggregationGNN: implements the aggregation GNN architecture
 MultiNodeAggregationGNN: implementes the multi-node aggregation GNN architecture
 GraphAttentionNetwork: implement the graph attention network architecture
+GraphConvolutionAttentionNetwork: implement the graph convolution attention
+    network (GCAT) architecture
+EdgeVariantAttention: implement the edge variant graph filter, with coefficients
+    learned following a parameterization given by the attention mechanism
 """
 
 import numpy as np
@@ -23,6 +34,8 @@ import torch.nn as nn
 
 import Utils.graphML as gml
 import Utils.graphTools
+
+from Utils.dataTools import changeDataType
 
 zeroTolerance = 1e-9 # Absolute values below this number are considered zero.
 
@@ -36,12 +49,17 @@ class SelectionGNN(nn.Module):
                      nonlinearity, # Nonlinearity
                      nSelectedNodes, poolingFunction, poolingSize, # Pooling
                      dimLayersMLP, # MLP in the end
-                     GSO, # Structure
+                     GSO, order = None, # Structure
                      coarsening = False)
 
         Input:
+            /** Graph convolutional layers **/
             dimNodeSignals (list of int): dimension of the signals at each layer
+                (i.e. number of features at each node, or size of the vector
+                 supported at each node)
             nFilterTaps (list of int): number of filter taps on each layer
+                (i.e. nFilterTaps-1 is the extent of neighborhoods that are
+                 reached, for example K=2 is info from the 1-hop neighbors)
             bias (bool): include bias after graph filter on every layer
             >> Obs.: dimNodeSignals[0] is the number of features (the dimension
                 of the node signals) of the data, where dimNodeSignals[l] is the
@@ -49,7 +67,11 @@ class SelectionGNN(nn.Module):
                 Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
                 different, nFilterTaps[l] is the number of filter taps for the
                 filters implemented at layer l+1, thus len(nFilterTaps) = L.
+                
+            /** Activation function **/
             nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Pooling **/
             nSelectedNodes (list of int): number of nodes to keep after pooling
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
@@ -57,7 +79,8 @@ class SelectionGNN(nn.Module):
             >> Obs.: If coarsening = True, this variable is ignored since the
                 number of nodes in each layer is given by the graph coarsening
                 algorithm.
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in Utils.graphML or in torch.nn): 
+                summarizing function
             >> Obs.: If coarsening = True, then the pooling function is one of
                 the regular 1-d pooling functions available in torch.nn (instead
                 of one of the summarizing functions in Utils.graphML).
@@ -66,14 +89,24 @@ class SelectionGNN(nn.Module):
             >> Obs.: If coarsening = True, then the pooling size is ignored 
                 since, due to the binary tree nature of the graph coarsening
                 algorithm, it always has to be 2.
+                
+            /** Readout layers **/
             dimLayersMLP (list of int): number of output hidden units of a
                 sequence of fully connected layers after the graph filters have
                 been applied
+                
+            /** Graph structure **/
             GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
             coarsening (bool, default = False): if True uses graph coarsening
                 instead of zero-padding to reduce the number of nodes.
-            >> Obs.: [i] Graph coarsening only works when the number
-                 of edge features is 1 -scalar weights-. [ii] The graph
+            >> Obs.: (i) Graph coarsening only works when the number
+                 of edge features is 1 -scalar weights-. (ii) The graph
                  coarsening forces a given order of the nodes, and this order
                  has to be used to reordering the GSO as well as the samples
                  during training; as such, this order is internally saved and
@@ -96,6 +129,31 @@ class SelectionGNN(nn.Module):
         Output:
             y (torch.tensor): output data after being processed by the selection
                 GNN; shape: batchSize x dimLayersMLP[-1]
+                
+    Other methods:
+        
+        .changeGSO(S, nSelectedNodes = [], poolingSize = []): takes as input a
+        new graph shift operator S as a tensor of shape 
+            (dimEdgeFeatures x) numberNodes x numberNodes
+        Then, next time the SelectionGNN is run, it will run over the graph 
+        with GSO S, instead of running over the original GSO S. This is 
+        particularly useful when training on one graph, and testing on another
+        one. The number of selected nodes and the pooling size will not change
+        unless specifically consider those as input. Those lists need to have
+        the same length as the number of layers. There is no need to define
+        both, unless they change.
+        >> Obs.: The number of nodes in the GSOs need not be the same, but
+            unless we want to risk zero-padding beyond the original number
+            of nodes (which just results in disconnected nodes), then we might
+            want to update the nSelectedNodes and poolingSize accordingly, if
+            the size of the new GSO is different.
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GNN y,
+        which is of shape batchSize x dimLayersMLP[-1], as well as the output
+        of all the GNN layers (i.e. before the MLP layers), yGNN of shape
+        batchSize x nSelectedNodes[-1] x dimFeatures[-1]. This can be used to
+        isolate the effect of the graph convolutions from the effect of the
+        readout layer.
     """
 
     def __init__(self,
@@ -109,6 +167,8 @@ class SelectionGNN(nn.Module):
                  dimLayersMLP,
                  # Structure
                  GSO,
+                 # Ordering
+                 order = None,
                  # Coarsening
                  coarsening = False):
         # Initialize parent:
@@ -133,15 +193,30 @@ class SelectionGNN(nn.Module):
         self.F = dimNodeSignals # Features
         self.K = nFilterTaps # Filter taps
         self.E = GSO.shape[0] # Number of edge features
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+     
         self.coarsening = coarsening # Whether to do coarsening or not
         # If we have to do coarsening, then note that it can only be done if
         # we have a single edge feature, otherwise, each edge feature could be
-        # coarsed (and thus, ordered) in a different way, and there is no s
+        # coarsed (and thus, ordered) in a different way, and there is no
         # sensible way of merging back this different orderings. So, we will
         # only do coarsening if we have a single edge feature; otherwise, we
         # will default to selection sampling (therefore, always specify
         # nSelectedNodes)
         if self.coarsening and self.E == 1:
+            self.permFunction = Utils.graphTools.permCoarsening # Override
+                # permutation function for the one corresponding to coarsening
             GSO = scipy.sparse.csr_matrix(GSO[0])
             GSO, self.order = Utils.graphTools.coarsen(GSO, levels=self.L,
                                                        self_connections=False)
@@ -165,15 +240,18 @@ class SelectionGNN(nn.Module):
             # pooling, we always need to force a pooling size of 2
             self.alpha = [2] * self.L
         else:
-            # If there's not coarsening, just save the GSO as a torch.tensor
-            self.S = torch.tensor(GSO)
+            # Call the corresponding ordering function. Recall that if no
+            # order was selected, then this is permIdentity, so that nothing
+            # changes.
+            self.S, self.order = self.permFunction(GSO)
+            if 'torch' not in repr(self.S.dtype):
+                self.S = torch.tensor(self.S)
             self.N = [GSO.shape[1]] + nSelectedNodes # Number of nodes
             self.alpha = poolingSize
             self.coarsening = False # If it failed because there are more than
                 # one edge feature, then just set this to false, so we do not
                 # need to keep checking whether self.E == 1 or not, just this
                 # one
-            self.order = None # No internal order, the order is given externally
         # See that we adding N_{0} = N as the number of nodes input the first
         # layer: this above is the list containing how many nodes are between
         # each layer.
@@ -233,24 +311,123 @@ class SelectionGNN(nn.Module):
         # And we're done
         self.MLP = nn.Sequential(*fc)
         # so we finally have the architecture.
+        
+    def changeGSO(self, GSO, nSelectedNodes = [], poolingSize = []):
+        
+        # We use this to change the GSO, using the same graph filters.
+        
+        # Check that the new GSO has the correct
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        
+        # Get dataType and device of the current GSO, so when we replace it, it
+        # is still located in the same type and the same device.
+        dataType = self.S.dtype
+        if 'device' in dir(self.S):
+            device = self.S.device
+        else:
+            device = None
+            
+        # Now, if we don't have coarsening, then we need to reorder the GSO,
+        # and since this GSO reordering will affect several parts of the non
+        # coarsening algorithm, then we will do it now
+        # Reorder the GSO
+        if not self.coarsening:
+            self.S, self.order = self.permFunction(GSO)
+            # Change data type and device as required
+            self.S = changeDataType(self.S, dataType)
+            if device is not None:
+                self.S = self.S.to(device)
+            
+        # Before making decisions, check if there is a new poolingSize list
+        if len(poolingSize) > 0 and not self.coarsening:
+            # (If it's coarsening, then the pooling size cannot change)
+            # Check it has the right length
+            assert len(poolingSize) == self.L
+            # And update it
+            self.alpha = poolingSize
+        
+        # Now, check if we have a new list of nodes (this only makes sense
+        # if there is no coarsening, because if it is coarsening, the list with
+        # the number of nodes to be considered is ignored.)
+        if len(nSelectedNodes) > 0 and not self.coarsening:
+            # If we do, then we need to change the pooling functions to select
+            # less nodes. This would allow to use graphs of different size.
+            # Note that the pooling function, there is nothing learnable, so
+            # they can easily be re-made, re-initialized.
+            # The first thing we need to check, is that the length of the
+            # number of nodes is equal to the number of layers (this list 
+            # indicates the number of nodes selected at the output of each
+            # layer)
+            assert len(nSelectedNodes) == self.L
+            # Then, update the N that we have stored
+            self.N = [GSO.shape[1]] + nSelectedNodes
+            # And get the new pooling functions
+            for l in range(self.L):
+                # For each layer, add the pooling function
+                self.GFL[3*l+2] = self.rho(self.N[l], self.N[l+1],
+                                           self.alpha[l])
+                self.GFL[3*l+2].addGSO(self.S)
+        elif len(nSelectedNodes) == 0 and not self.coarsening:
+            # Just update the GSO
+            for l in range(self.L):
+                self.GFL[3*l+2].addGSO(self.S)
+        
+        # If it's coarsening, then we need to compute the new coarsening
+        # scheme
+        if self.coarsening and self.E == 1:
+            device = self.S[0].device
+            GSO = scipy.sparse.csr_matrix(GSO[0])
+            GSO, self.order = Utils.graphTools.coarsen(GSO, levels=self.L,
+                                                       self_connections=False)
+            # Now, GSO is a list of csr_matrix with self.L+1 coarsened GSOs,
+            # we need to torch.tensor them and put them in a list.
+            # order is just a list of indices to reorder the nodes.
+            self.S = []
+            self.N = [] # It has to be reset, because now the number of
+                # nodes is determined by the coarsening scheme
+            for S in GSO:
+                S = S.todense().A.reshape([self.E, S.shape[0], S.shape[1]])
+                    # So, S.todense() returns a numpy.matrix object; a numpy
+                    # matrix cannot be converted into a tensor (i.e., added
+                    # the third dimension), therefore we need to convert it to
+                    # a numpy.array. According to the documentation, the 
+                    # attribute .A in a numpy.matrix returns self as an ndarray
+                    # object. So that's why the .A is there.
+                self.S.append(torch.tensor(S).to(device))
+                self.N.append(S.shape[1])
+            # And we need to update the GSO in all the places.
+            #   Note that we do not need to change the pooling function, because
+            #   it is the standard pooling function that doesn't care about the
+            #   number of nodes: it still takes one every two of them.
+            for l in range(self.L):
+                self.GFL[3*l].addGSO(self.S[l]) # Graph convolutional layer
+        else:
+            # And update in the LSIGF that is still missing (recall that the
+            # ordering for the non-coarsening case has already been done)
+            for l in range(self.L):
+                self.GFL[3*l].addGSO(self.S) # Graph convolutional layer
 
-    def forward(self, x):
-        # Check if we need to reorder it (due to the internal ordering stemming
-        # from the coarsening procedure)
-        if self.coarsening:
-            # If they have the same number of nodes (i.e. no dummy nodes where
-            # added in the coarsening step) just re order them
-            if x.shape[2] == self.N[0]:
-                x = x[:, :, self.order]
-            # If dummy nodes where added, then we need to add them to the data.
-            # This is achieved by a function perm_data, but that operates on
-            # np.arrays(), so we need to reconvert them back to np.arrays
-            else:
-                thisDevice = x.device # Save the device we where operating on
-                x = x.cpu().numpy() # Convert to numpy
-                x = Utils.graphTools.permCoarsening(x, self.order) 
-                    # Re order and add dummy values
-                x = torch.tensor(x).to(thisDevice)
+    def splitForward(self, x):
+        
+        # Reorder the nodes from the data
+        # If we have added dummy nodes (which, has to happen when the size
+        # is different and we chose coarsening), then we need to use the
+        # provided permCoarsening function (which acts on data to add dummy
+        # variables)
+        if x.shape[2] != self.N[0] and self.coarsening:
+            thisDevice = x.device # Save the device we where operating on
+            x = x.cpu().numpy() # Convert to numpy
+            x = Utils.graphTools.permCoarsening(x, self.order) 
+                # Re order and add dummy values
+            x = torch.tensor(x).to(thisDevice)
+        else:
+        # If not, simply reorder the nodes
+            x = x[:, :, self.order]
 
         # Now we compute the forward call
         assert len(x.shape) == 3
@@ -260,10 +437,21 @@ class SelectionGNN(nn.Module):
         # Let's call the graph filtering layer
         y = self.GFL(x)
         # Flatten the output
-        y = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        yFlat = y.reshape(batchSize, self.F[-1] * self.N[-1])
         # And, feed it into the MLP
-        return self.MLP(y)
+        return self.MLP(yFlat), y
         # If self.MLP is a sequential on an empty list it just does nothing.
+    
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
 
     def to(self, device):
         # Because only the filter taps and the weights are registered as
@@ -282,6 +470,710 @@ class SelectionGNN(nn.Module):
             for l in range(self.L):
                 self.GFL[3*l].addGSO(self.S)
                 self.GFL[3*l+2].addGSO(self.S)
+                
+class LocalActivationGNN(nn.Module):
+    """
+    LocalActivationGNN: implements the selection GNN architecture with a local
+        activation function (instead of pointwise)
+        
+    Initialization:
+
+        SelectionGNN(dimNodeSignals, nFilterTaps, bias, # Graph Filtering
+                     nonlinearity, kHopActivation, # Nonlinearity
+                     nSelectedNodes, poolingFunction, poolingSize, # Pooling
+                     dimLayersMLP, # MLP in the end
+                     GSO, order = None) # Structure
+
+        Input:
+            /** Graph convolutional layers **/
+            dimNodeSignals (list of int): dimension of the signals at each layer
+                (i.e. number of features at each node, or size of the vector
+                 supported at each node)
+            nFilterTaps (list of int): number of filter taps on each layer
+                (i.e. nFilterTaps-1 is the extent of neighborhoods that are
+                 reached, for example K=2 is info from the 1-hop neighbors)
+            bias (bool): include bias after graph filter on every layer
+            >> Obs.: dimNodeSignals[0] is the number of features (the dimension
+                of the node signals) of the data, where dimNodeSignals[l] is the
+                dimension obtained at the output of layer l, l=1,...,L.
+                Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
+                different, nFilterTaps[l] is the number of filter taps for the
+                filters implemented at layer l+1, thus len(nFilterTaps) = L.
+                
+            /** Activation function **/
+            nonlinearity (torch.nn): module from Utils.graphML non-linear
+                local activation functions
+            kHopActivation (list of int): number of neighborhood hop to include
+                in the local activation function at each layer
+            
+            /** Pooling **/
+            nSelectedNodes (list of int): number of nodes to keep after pooling
+                on each layer
+            >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
+                from the first element in the order specified by the given GSO
+            >> Obs.: If coarsening = True, this variable is ignored since the
+                number of nodes in each layer is given by the graph coarsening
+                algorithm.
+            poolingFunction (nn.Module in Utils.graphML or in torch.nn): 
+                summarizing function
+            >> Obs.: If coarsening = True, then the pooling function is one of
+                the regular 1-d pooling functions available in torch.nn (instead
+                of one of the summarizing functions in Utils.graphML).
+            poolingSize (list of int): size of the neighborhood to compute the
+                summary from at each layer
+            >> Obs.: If coarsening = True, then the pooling size is ignored 
+                since, due to the binary tree nature of the graph coarsening
+                algorithm, it always has to be 2.
+                
+            /** Readout layers **/
+            dimLayersMLP (list of int): number of output hidden units of a
+                sequence of fully connected layers after the graph filters have
+                been applied
+                
+            /** Graph structure **/
+            GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
+
+        Output:
+            nn.Module with a Selection GNN architecture with the above specified
+            characteristics.
+
+    Forward call:
+
+        LocalActivationGNN(x)
+
+        Input:
+            x (torch.tensor): input data of shape
+                batchSize x dimFeatures x numberNodes
+
+        Output:
+            y (torch.tensor): output data after being processed by the selection
+                GNN; shape: batchSize x dimLayersMLP[-1]
+                
+    Other methods:
+        
+        .changeGSO(S, nSelectedNodes = [], poolingSize = []): takes as input a
+        new graph shift operator S as a tensor of shape 
+            (dimEdgeFeatures x) numberNodes x numberNodes
+        Then, next time the SelectionGNN is run, it will run over the graph 
+        with GSO S, instead of running over the original GSO S. This is 
+        particularly useful when training on one graph, and testing on another
+        one. The number of selected nodes and the pooling size will not change
+        unless specifically consider those as input. Those lists need to have
+        the same length as the number of layers. There is no need to define
+        both, unless they change.
+        >> Obs.: The number of nodes in the GSOs need not be the same, but
+            unless we want to risk zero-padding beyond the original number
+            of nodes (which just results in disconnected nodes), then we might
+            want to update the nSelectedNodes and poolingSize accordingly, if
+            the size of the new GSO is different.
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GNN y,
+        which is of shape batchSize x dimLayersMLP[-1], as well as the output
+        of all the GNN layers (i.e. before the MLP layers), yGNN of shape
+        batchSize x nSelectedNodes[-1] x dimFeatures[-1]. This can be used to
+        isolate the effect of the graph convolutions from the effect of the
+        readout layer.
+    """
+
+    def __init__(self,
+                 # Graph filtering
+                 dimNodeSignals, nFilterTaps, bias,
+                 # Nonlinearity
+                 nonlinearity, kHopActivation,
+                 # Pooling
+                 nSelectedNodes, poolingFunction, poolingSize,
+                 # MLP in the end
+                 dimLayersMLP,
+                 # Structure
+                 GSO, order = None):
+        # Initialize parent:
+        super().__init__()
+        # dimNodeSignals should be a list and of size 1 more than nFilter taps.
+        assert len(dimNodeSignals) == len(nFilterTaps) + 1
+        # kHopActivation is a list with the same number of elements as 
+        # nFilterTaps (number of layers)
+        assert len(kHopActivation) == len(nFilterTaps)
+        # nSelectedNodes should be a list of size nFilterTaps, since the number
+        # of nodes in the first layer is always the size of the graph
+        assert len(nSelectedNodes) == len(nFilterTaps)
+        # poolingSize also has to be a list of the same size
+        assert len(poolingSize) == len(nFilterTaps)
+        # Check whether the GSO has features or not. After that, always handle
+        # it as a matrix of dimension E x N x N.
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        # Store the values (using the notation in the paper):
+        self.L = len(nFilterTaps) # Number of graph filtering layers
+        self.F = dimNodeSignals # Features
+        self.K = nFilterTaps # Filter taps
+        self.kHop = kHopActivation # k-hop neighborhood for local activation
+        self.E = GSO.shape[0] # Number of edge features
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+     
+        # Call the corresponding ordering function. Recall that if no
+        # order was selected, then this is permIdentity, so that nothing
+        # changes.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
+        self.N = [GSO.shape[1]] + nSelectedNodes # Number of nodes
+        self.alpha = poolingSize
+
+        # See that we adding N_{0} = N as the number of nodes input the first
+        # layer: this above is the list containing how many nodes are between
+        # each layer.
+        self.bias = bias # Boolean
+        # Store the rest of the variables
+        self.sigma = nonlinearity
+        self.rho = poolingFunction
+        self.dimLayersMLP = dimLayersMLP
+        # And now, we're finally ready to create the architecture:
+        #\\\ Graph filtering layers \\\
+        # OBS.: We could join this for with the one before, but we keep separate
+        # for clarity of code.
+        gfl = [] # Graph Filtering Layers
+        for l in range(self.L):
+            #\\ Graph filtering stage:
+            gfl.append(gml.GraphFilter(self.F[l], self.F[l+1], self.K[l],
+                                              self.E, self.bias))
+            # There is a 3*l below here, because we have three elements per
+            # layer: graph filter, nonlinearity and pooling, so after each layer
+            # we're actually adding elements to the (sequential) list.
+            gfl[3*l].addGSO(self.S)
+            #\\ Nonlinearity
+            gfl.append(self.sigma(self.kHop[l]))
+            # Add GSO for this layer
+            gfl[3*l+1].addGSO(self.S)
+            #\\ Pooling
+            gfl.append(self.rho(self.N[l], self.N[l+1], self.alpha[l]))
+            # Same as before, this is 3*l+2
+            gfl[3*l+2].addGSO(self.S)
+        # And now feed them into the sequential
+        self.GFL = nn.Sequential(*gfl) # Graph Filtering Layers
+        #\\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimLayersMLP) > 0: # Maybe we don't want to MLP anything
+            # The first layer has to connect whatever was left of the graph
+            # signal, flattened.
+            dimInputMLP = self.N[-1] * self.F[-1]
+            # (i.e., we have N[-1] nodes left, each one described by F[-1]
+            # features which means this will be flattened into a vector of size
+            # N[-1]*F[-1])
+            fc.append(nn.Linear(dimInputMLP, dimLayersMLP[0], bias = self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimLayersMLP)-1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.sigma())
+                # And add the linear layer
+                fc.append(nn.Linear(dimLayersMLP[l], dimLayersMLP[l+1],
+                                    bias = self.bias))
+        # And we're done
+        self.MLP = nn.Sequential(*fc)
+        # so we finally have the architecture.
+        
+    def changeGSO(self, GSO, nSelectedNodes = [], poolingSize = []):
+        
+        # We use this to change the GSO, using the same graph filters.
+        
+        # Check that the new GSO has the correct
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        
+        # Get dataType and device of the current GSO, so when we replace it, it
+        # is still located in the same type and the same device.
+        dataType = self.S.dtype
+        if 'device' in dir(self.S):
+            device = self.S.device
+        else:
+            device = None
+        
+        # Reorder the new GSO
+        self.S, self.order = self.permFunction(GSO)
+        # Change data type and device as required
+        self.S = changeDataType(self.S, dataType)
+        if device is not None:
+            self.S = self.S.to(device)
+            
+        # Before making decisions, check if there is a new poolingSize list
+        if len(poolingSize) > 0:
+            # (If it's coarsening, then the pooling size cannot change)
+            # Check it has the right length
+            assert len(poolingSize) == self.L
+            # And update it
+            self.alpha = poolingSize
+        
+        # Now, check if we have a new list of nodes (this only makes sense
+        # if there is no coarsening, because if it is coarsening, the list with
+        # the number of nodes to be considered is ignored.)
+        if len(nSelectedNodes) > 0:
+            # If we do, then we need to change the pooling functions to select
+            # less nodes. This would allow to use graphs of different size.
+            # Note that the pooling function, there is nothing learnable, so
+            # they can easily be re-made, re-initialized.
+            # The first thing we need to check, is that the length of the
+            # number of nodes is equal to the number of layers (this list 
+            # indicates the number of nodes selected at the output of each
+            # layer)
+            assert len(nSelectedNodes) == self.L
+            # Then, update the N that we have stored
+            self.N = [GSO.shape[1]] + nSelectedNodes
+            # And get the new pooling functions
+            for l in range(self.L):
+                # For each layer, add the pooling function
+                self.GFL[3*l+2] = self.rho(self.N[l], self.N[l+1],
+                                           self.alpha[l])
+                self.GFL[3*l+2].addGSO(self.S)
+        elif len(nSelectedNodes) == 0 and not self.coarsening:
+            # Just update the GSO
+            for l in range(self.L):
+                self.GFL[3*l+2].addGSO(self.S)
+        
+        
+        # And update in the LSIGF that is still missing (recall that the
+        # ordering for the non-coarsening case has already been done)
+        for l in range(self.L):
+            self.GFL[3*l].addGSO(self.S) # Graph convolutional layer
+            self.GFL[3*l+1].addGSO(self.S) # Local Activation function
+
+    def splitForward(self, x):
+        
+        # Now we compute the forward call
+        assert len(x.shape) == 3
+        batchSize = x.shape[0]
+        assert x.shape[1] == self.F[0]
+        assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
+        # Let's call the graph filtering layer
+        y = self.GFL(x)
+        # Flatten the output
+        yFlat = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        # And, feed it into the MLP
+        return self.MLP(yFlat), y
+        # If self.MLP is a sequential on an empty list it just does nothing.
+    
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
+
+    def to(self, device):
+        # Because only the filter taps and the weights are registered as
+        # parameters, when we do a .to(device) operation it does not move the
+        # GSOs. So we need to move them ourselves.
+        # Call the parent .to() method (to move the registered parameters)
+        super().to(device)
+        # Move the GSO
+        self.S = self.S.to(device)
+        # And all the other variables derived from it.
+        for l in range(self.L):
+            self.GFL[3*l].addGSO(self.S)
+            self.GFL[3*l+1].addGSO(self.S)
+            self.GFL[3*l+2].addGSO(self.S)
+                
+class LocalGNN(nn.Module):
+    """
+    LocalGNN: implement the selection GNN architecture where all operations are
+        implemented locally, i.e. by means of neighboring exchanges only. More
+        specifically, it has graph convolutional layers, but the readout layer,
+        instead of being an MLP for the entire graph signal, it is a linear
+        combination of the features at each node.
+        >> Obs.: This precludes the use of clustering as a pooling operation,
+            since clustering is not local (it changes the given graph).
+
+    Initialization:
+
+        LocalGNN(dimNodeSignals, nFilterTaps, bias, # Graph Filtering
+                 nonlinearity, # Nonlinearity
+                 nSelectedNodes, poolingFunction, poolingSize, # Pooling
+                 dimReadout, # Local readout layer
+                 GSO, order = None # Structure)
+
+        Input:
+            /** Graph convolutional layers **/
+            dimNodeSignals (list of int): dimension of the signals at each layer
+                (i.e. number of features at each node, or size of the vector
+                 supported at each node)
+            nFilterTaps (list of int): number of filter taps on each layer
+                (i.e. nFilterTaps-1 is the extent of neighborhoods that are
+                 reached, for example K=2 is info from the 1-hop neighbors)
+            bias (bool): include bias after graph filter on every layer
+            >> Obs.: dimNodeSignals[0] is the number of features (the dimension
+                of the node signals) of the data, where dimNodeSignals[l] is the
+                dimension obtained at the output of layer l, l=1,...,L.
+                Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
+                different, nFilterTaps[l] is the number of filter taps for the
+                filters implemented at layer l+1, thus len(nFilterTaps) = L.
+                
+            /** Activation function **/
+            nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Pooling **/
+            nSelectedNodes (list of int): number of nodes to keep after pooling
+                on each layer
+            >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
+                from the first element in the order specified by the given GSO
+            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingSize (list of int): size of the neighborhood to compute the
+                summary from at each layer
+            
+            /** Readout layers **/
+            dimReadout (list of int): number of output hidden units of a
+                sequence of fully connected layers applied locally at each node
+                (i.e. no exchange of information involved).
+                
+            /** Graph structure **/
+            GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
+
+        Output:
+            nn.Module with a Local GNN architecture with the above specified
+            characteristics.
+
+    Forward call:
+
+        LocalGNN(x)
+
+        Input:
+            x (torch.tensor): input data of shape
+                batchSize x dimFeatures x numberNodes
+
+        Output:
+            y (torch.tensor): output data after being processed by the selection
+                GNN; shape: batchSize x dimReadout[-1] x nSelectedNodes[-1]
+                
+    Other methods:
+        
+        .changeGSO(S, nSelectedNodes = [], poolingSize = []): takes as input a
+        new graph shift operator S as a tensor of shape 
+            (dimEdgeFeatures x) numberNodes x numberNodes
+        Then, next time the SelectionGNN is run, it will run over the graph 
+        with GSO S, instead of running over the original GSO S. This is 
+        particularly useful when training on one graph, and testing on another
+        one. The number of selected nodes and the pooling size will not change
+        unless specifically consider those as input. Those lists need to have
+        the same length as the number of layers. There is no need to define
+        both, unless they change.
+        >> Obs.: The number of nodes in the GSOs need not be the same, but
+            unless we want to risk zero-padding beyond the original number
+            of nodes (which just results in disconnected nodes), then we might
+            want to update the nSelectedNodes and poolingSize accordingly, if
+            the size of the new GSO is different.
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GNN y,
+        which is of shape batchSize x dimReadout[-1], as well as the output
+        of all the GNN layers (i.e. before the readout layers), yGNN of shape
+        batchSize x nSelectedNodes[-1] x dimFeatures[-1]. This can be used to
+        isolate the effect of the graph convolutions from the effect of the
+        readout layer.
+        
+        y = .singleNodeForward(x, nodes): outputs the value of the last layer
+        at a single node. x is the usual input of shape batchSize x dimFeatures
+        x numberNodes. nodes is either a single node (int) or a collection of
+        nodes (list or numpy.array) of length batchSize, where for each element
+        in the batch, we get the output at the single specified node. The
+        output y is of shape batchSize x dimReadout[-1].
+    """
+
+    def __init__(self,
+                 # Graph filtering
+                 dimNodeSignals, nFilterTaps, bias,
+                 # Nonlinearity
+                 nonlinearity,
+                 # Pooling
+                 nSelectedNodes, poolingFunction, poolingSize,
+                 # MLP in the end
+                 dimReadout,
+                 # Structure
+                 GSO, order = None):
+        # Initialize parent:
+        super().__init__()
+        # dimNodeSignals should be a list and of size 1 more than nFilter taps.
+        assert len(dimNodeSignals) == len(nFilterTaps) + 1
+        # nSelectedNodes should be a list of size nFilterTaps, since the number
+        # of nodes in the first layer is always the size of the graph
+        assert len(nSelectedNodes) == len(nFilterTaps)
+        # poolingSize also has to be a list of the same size
+        assert len(poolingSize) == len(nFilterTaps)
+        # Check whether the GSO has features or not. After that, always handle
+        # it as a matrix of dimension E x N x N.
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        # Store the values (using the notation in the paper):
+        self.L = len(nFilterTaps) # Number of graph filtering layers
+        self.F = dimNodeSignals # Features
+        self.K = nFilterTaps # Filter taps
+        self.E = GSO.shape[0] # Number of edge features
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
+        self.alpha = poolingSize
+        self.N = [GSO.shape[1]] + nSelectedNodes # Number of nodes
+        # See that we adding N_{0} = N as the number of nodes input the first
+        # layer: this above is the list containing how many nodes are between
+        # each layer.
+        self.bias = bias # Boolean
+        # Store the rest of the variables
+        self.sigma = nonlinearity
+        self.rho = poolingFunction
+        self.dimReadout = dimReadout
+        # And now, we're finally ready to create the architecture:
+        #\\\ Graph filtering layers \\\
+        # OBS.: We could join this for with the one before, but we keep separate
+        # for clarity of code.
+        gfl = [] # Graph Filtering Layers
+        for l in range(self.L):
+            #\\ Graph filtering stage:
+            gfl.append(gml.GraphFilter(self.F[l], self.F[l+1], self.K[l],
+                                              self.E, self.bias))
+            # There is a 3*l below here, because we have three elements per
+            # layer: graph filter, nonlinearity and pooling, so after each layer
+            # we're actually adding elements to the (sequential) list.
+            gfl[3*l].addGSO(self.S)
+            #\\ Nonlinearity
+            gfl.append(self.sigma())
+            #\\ Pooling
+            gfl.append(self.rho(self.N[l], self.N[l+1], self.alpha[l]))
+            # Same as before, this is 3*l+2
+            gfl[3*l+2].addGSO(self.S)
+        # And now feed them into the sequential
+        self.GFL = nn.Sequential(*gfl) # Graph Filtering Layers
+        #\\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimReadout) > 0: # Maybe we don't want to readout anything
+            # The first layer has to connect whatever was left of the graph 
+            # filtering stage to create the number of features required by
+            # the readout layer
+            fc.append(nn.Linear(self.F[-1], dimReadout[0], bias = self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimReadout)-1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.sigma())
+                # And add the linear layer
+                fc.append(nn.Linear(dimReadout[l], dimReadout[l+1],
+                                    bias = self.bias))
+        # And we're done
+        self.Readout = nn.Sequential(*fc)
+        # so we finally have the architecture.
+        
+    def changeGSO(self, GSO, nSelectedNodes = [], poolingSize = []):
+        
+        # We use this to change the GSO, using the same graph filters.
+        
+        # Check that the new GSO has the correct
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+            
+        # Get dataType and device of the current GSO, so when we replace it, it
+        # is still located in the same type and the same device.
+        dataType = self.S.dtype
+        if 'device' in dir(self.S):
+            device = self.S.device
+        else:
+            device = None
+        
+        # Reorder the new GSO
+        self.S, self.order = self.permFunction(GSO)
+        # Change data type and device as required
+        self.S = changeDataType(self.S, dataType)
+        if device is not None:
+            self.S = self.S.to(device)
+            
+        # Before making decisions, check if there is a new poolingSize list
+        if len(poolingSize) > 0:
+            # Check it has the right length
+            assert len(poolingSize) == self.L
+            # And update it
+            self.alpha = poolingSize
+        
+        # Now, check if we have a new list of nodes
+        if len(nSelectedNodes) > 0:
+            # If we do, then we need to change the pooling functions to select
+            # less nodes. This would allow to use graphs of different size.
+            # Note that the pooling function, there is nothing learnable, so
+            # they can easily be re-made, re-initialized.
+            # The first thing we need to check, is that the length of the
+            # number of nodes is equal to the number of layers (this list 
+            # indicates the number of nodes selected at the output of each
+            # layer)
+            assert len(nSelectedNodes) == self.L
+            # Then, update the N that we have stored
+            self.N = [GSO.shape[1]] + nSelectedNodes
+            # And get the new pooling functions
+            for l in range(self.L):
+                # For each layer, add the pooling function
+                self.GFL[3*l+2] = self.rho(self.N[l], self.N[l+1],
+                                           self.alpha[l])
+                self.GFL[3*l+2].addGSO(self.S)
+        else:
+            # Just update the GSO
+            for l in range(self.L):
+                self.GFL[3*l+2].addGSO(self.S)
+        
+        # And update in the LSIGF that is still missing
+        for l in range(self.L):
+            self.GFL[3*l].addGSO(self.S) # Graph convolutional layer
+
+    def splitForward(self, x):
+
+        # Now we compute the forward call
+        assert len(x.shape) == 3
+        assert x.shape[1] == self.F[0]
+        assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
+        # Let's call the graph filtering layer
+        yGFL = self.GFL(x)
+        # Change the order, for the readout
+        y = yGFL.permute(0, 2, 1) # B x N[-1] x F[-1]
+        # And, feed it into the Readout layer
+        y = self.Readout(y) # B x N[-1] x dimReadout[-1]
+        # Reshape and return
+        return y.permute(0, 2, 1), yGFL
+        # B x dimReadout[-1] x N[-1], B x dimFeatures[-1] x N[-1]
+    
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
+    
+    def singleNodeForward(self, x, nodes):
+        
+        # x is of shape B x F[0] x N[-1]
+        batchSize = x.shape[0]
+        # nodes is either an int, or a list/np.array of ints of size B
+        assert type(nodes) is int \
+                or type(nodes) is list \
+                or type(nodes) is np.ndarray
+        
+        # Let us start by building the selection matrix
+        # This selection matrix has to be a matrix of shape
+        #   B x N[-1] x 1
+        # so that when multiplying with the output of the forward, we get a
+        #   B x dimRedout[-1] x 1
+        # and we just squeeze the last dimension
+        
+        # TODO: The big question here is if multiplying by a matrix is faster
+        # than doing torch.index_select
+        
+        # Let's always work with numpy arrays to make it easier.
+        if type(nodes) is int:
+            # Change the node number to accommodate the new order
+            nodes = self.order.index(nodes)
+            # If it's int, make it a list and an array
+            nodes = np.array([nodes], dtype=np.int)
+            # And repeat for the number of batches
+            nodes = np.tile(nodes, batchSize)
+        if type(nodes) is list:
+            newNodes = [self.order.index(n) for n in nodes]
+            nodes = np.array(newNodes, dtype = np.int)
+        elif type(nodes) is np.ndarray:
+            newNodes = np.array([np.where(np.array(self.order) == n)[0][0] \
+                                                                for n in nodes])
+            nodes = newNodes.astype(np.int)
+        # Now, nodes is an np.int np.ndarray with shape batchSize
+        
+        # Build the selection matrix
+        selectionMatrix = np.zeros([batchSize, self.N[-1], 1])
+        selectionMatrix[np.arange(batchSize), nodes, 0] = 1.
+        # And convert it to a tensor
+        selectionMatrix = torch.tensor(selectionMatrix,
+                                       dtype = x.dtype,
+                                       device = x.device)
+        
+        # Now compute the output
+        y = self.forward(x)
+        # This output is of size B x dimReadout[-1] x N[-1]
+        
+        # Multiply the output
+        y = torch.matmul(y, selectionMatrix)
+        #   B x dimReadout[-1] x 1
+        
+        # Squeeze the last dimension and return
+        return y.squeeze(2)
+
+    def to(self, device):
+        # Because only the filter taps and the weights are registered as
+        # parameters, when we do a .to(device) operation it does not move the
+        # GSOs. So we need to move them ourselves.
+        # Call the parent .to() method (to move the registered parameters)
+        super().to(device)
+        # Move the GSO
+        self.S = self.S.to(device)
+        # And all the other variables derived from it.
+        for l in range(self.L):
+            self.GFL[3*l].addGSO(self.S)
+            self.GFL[3*l+2].addGSO(self.S)
 
 class SpectralGNN(nn.Module):
     """
@@ -293,11 +1185,16 @@ class SpectralGNN(nn.Module):
                     nonlinearity, # Nonlinearity
                     nSelectedNodes, poolingFunction, poolingSize, # Pooling
                     dimLayersMLP, # MLP in the end
-                    GSO) # Structure
+                    GSO, order = None) # Structure
 
         Input:
+            /** Graph convolutional layers **/
             dimNodeSignals (list of int): dimension of the signals at each layer
-            nCoeff (list of int): number of coefficients on each layer
+                (i.e. number of features at each node, or size of the vector
+                 supported at each node)
+            nCoeff (list of int): number of coefficients on each layer; if 
+                nCoeff[l] is less than the size of the graph, the remaining 
+                coefficients are interpolated by means of a cubic spline.
             bias (bool): include bias after graph filter on every layer
             >> Obs.: dimNodeSignals[0] is the number of features (the dimension
                 of the node signals) of the data, where dimNodeSignals[l] is the
@@ -305,10 +1202,12 @@ class SpectralGNN(nn.Module):
                 Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
                 different, nCoeff[l] is the number of coefficients for the
                 filters implemented at layer l+1, thus len(nCoeff) = L.
-            >> Obs.: If nCoeff[l] is less than the size of the graph, the
-                remaining coefficients are interpolated by means of a cubic
-                spline.
+                
+            
+            /** Activation function **/
             nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Pooling **/
             nSelectedNodes (list of int): number of nodes to keep after pooling
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
@@ -316,14 +1215,25 @@ class SpectralGNN(nn.Module):
             poolingFunction (nn.Module in Utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
+                
+            
+            /** Readout layers **/
             dimLayersMLP (list of int): number of output hidden units of a
                 sequence of fully connected layers after the graph filters have
                 been applied
+
+            /** Graph structure **/
             GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
 
         Output:
             nn.Module with a Selection GNN architecture with the above specified
-            characteristics.
+            characteristics, using filters in the spectral domain.
 
     Forward call:
 
@@ -336,6 +1246,28 @@ class SpectralGNN(nn.Module):
         Output:
             y (torch.tensor): output data after being processed by the selection
                 GNN; shape: batchSize x dimLayersMLP[-1]
+                
+    Other methods:
+        
+        .changeGSO(S, nSelectedNodes = [], poolingSize = []): takes as input a
+        new graph shift operator S as a tensor of shape 
+            (dimEdgeFeatures x) numberNodes x numberNodes
+        Then, next time the SelectionGNN is run, it will run over the graph 
+        with GSO S, instead of running over the original GSO S. This is 
+        particularly useful when training on one graph, and testing on another
+        one. The number of selected nodes and the pooling size will not change
+        unless specifically consider those as input. Those lists need to have
+        the same length as the number of layers. There is no need to define
+        both, unless they change.
+        >> Obs.: This will only work if both the original GSO and the new one
+            have the same number of nodes.
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GNN y,
+        which is of shape batchSize x dimLayersMLP[-1], as well as the output
+        of all the GNN layers (i.e. before the MLP layers), yGNN of shape
+        batchSize x nSelectedNodes[-1] x dimFeatures[-1]. This can be used to
+        isolate the effect of the graph convolutions from the effect of the
+        readout layer.
     """
 
     def __init__(self,
@@ -348,7 +1280,7 @@ class SpectralGNN(nn.Module):
                  # MLP in the end
                  dimLayersMLP,
                  # Structure
-                 GSO):
+                 GSO, order = None):
         # Initialize parent:
         super().__init__()
         # dimNodeSignals should be a list and of size 1 more than nFilter taps.
@@ -371,12 +1303,26 @@ class SpectralGNN(nn.Module):
         self.F = dimNodeSignals # Features
         self.M = nCoeff # Filter taps
         self.E = GSO.shape[0] # Number of edge features
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
         self.N = [GSO.shape[1]] + nSelectedNodes # Number of nodes
         # See that we adding N_{0} = N as the number of nodes input the first
         # layer: this above is the list containing how many nodes are between
         # each layer.
         self.bias = bias # Boolean
-        self.S = torch.tensor(GSO)
         self.sigma = nonlinearity
         self.rho = poolingFunction
         self.alpha = poolingSize
@@ -426,20 +1372,95 @@ class SpectralGNN(nn.Module):
         # And we're done
         self.MLP = nn.Sequential(*fc)
         # so we finally have the architecture.
+        
+    def changeGSO(self, GSO, nSelectedNodes = [], poolingSize = []):
+        
+        # We use this to change the GSO, using the same graph filters.
+        
+        # Check that the new GSO has the correct
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+            
+        # Get dataType and device of the current GSO, so when we replace it, it
+        # is still located in the same type and the same device.
+        dataType = self.S.dtype
+        if 'device' in dir(self.S):
+            device = self.S.device
+        else:
+            device = None
+        
+        # Reorder the new GSO
+        self.S, self.order = self.permFunction(GSO)
+        # Change data type and device as required
+        self.S = changeDataType(self.S, dataType)
+        if device is not None:
+            self.S = self.S.to(device)
+            
+        # Before making decisions, check if there is a new poolingSize list
+        if len(poolingSize) > 0:
+            # Check it has the right length
+            assert len(poolingSize) == self.L
+            # And update it
+            self.alpha = poolingSize
+        
+        # Now, check if we have a new list of nodes
+        if len(nSelectedNodes) > 0:
+            # If we do, then we need to change the pooling functions to select
+            # less nodes. This would allow to use graphs of different size.
+            # Note that the pooling function, there is nothing learnable, so
+            # they can easily be re-made, re-initialized.
+            # The first thing we need to check, is that the length of the
+            # number of nodes is equal to the number of layers (this list 
+            # indicates the number of nodes selected at the output of each
+            # layer)
+            assert len(nSelectedNodes) == self.L
+            # Then, update the N that we have stored
+            self.N = [GSO.shape[1]] + nSelectedNodes
+            # And get the new pooling functions
+            for l in range(self.L):
+                # For each layer, add the pooling function
+                self.SGFL[3*l+2] = self.rho(self.N[l], self.N[l+1],
+                                            self.alpha[l])
+                self.SGFL[3*l+2].addGSO(self.S)
+        else:
+            # Just update the GSO
+            for l in range(self.L):
+                self.SGFL[3*l+2].addGSO(self.S)
+        
+        # And update in the Spectral GF that is still missing
+        for l in range(self.L):
+            self.SGFL[3*l].addGSO(self.S) # Graph convolutional layer
 
-    def forward(self, x):
+    def splitForward(self, x):
         # Now we compute the forward call
         assert len(x.shape) == 3
         batchSize = x.shape[0]
         assert x.shape[1] == self.F[0]
         assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
         # Let's call the graph filtering layer
         y = self.SGFL(x)
         # Flatten the output
-        y = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        yFlat = y.reshape(batchSize, self.F[-1] * self.N[-1])
         # And, feed it into the MLP
-        return self.MLP(y)
+        return self.MLP(yFlat), y
         # If self.MLP is a sequential on an empty list it just does nothing.
+        
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
 
     def to(self, device):
         # Because only the filter taps and the weights are registered as
@@ -465,16 +1486,18 @@ class NodeVariantGNN(nn.Module):
                        nonlinearity, # Nonlinearity
                        nSelectedNodes, poolingFunction, poolingSize, # Pooling
                        dimLayersMLP, # MLP in the end
-                       GSO) # Structure
+                       GSO, order = None) # Structure
 
         Input:
+            /** Graph filtering layers **/
             dimNodeSignals (list of int): dimension of the signals at each layer
+                (i.e. number of features at each node, or size of the vector
+                 supported at each node)
             nShiftTaps (list of int): number of shift taps on each layer
-                (information is gathered from up to the (nShiftTaps-1)-hop
-                neighborhood)
-            nNodeTaps (list of int): number of node taps on each layer
-                (if nNodesTaps = nNodes, then each node has an independent
-                 coefficient)
+                (i.e. information is gathered from up to the (nShiftTaps-1)-hop
+                 neighborhood)
+            nNodeTaps (list of int): number of node taps on each layer; if 
+                nNodesTaps = nNodes, then each node has an independent coeff.
             bias (bool): include bias after graph filter on every layer
             >> Obs.: dimNodeSignals[0] is the number of features (the dimension
                 of the node signals) of the data, where dimNodeSignals[l] is the
@@ -486,7 +1509,11 @@ class NodeVariantGNN(nn.Module):
                 same, and every element of one list is associated with the
                 corresponding one on the other list to create the appropriate
                 NVGF filter at each layer.
+                
+            /** Activation function **/
             nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Pooling **/
             nSelectedNodes (list of int): number of nodes to keep after pooling
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
@@ -494,14 +1521,24 @@ class NodeVariantGNN(nn.Module):
             poolingFunction (nn.Module in Utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
+            
+            /** Readout layer **/
             dimLayersMLP (list of int): number of output hidden units of a
                 sequence of fully connected layers after the graph filters have
                 been applied
+                
+            /** Graph structure **/
             GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
 
         Output:
             nn.Module with a Selection GNN architecture with the above specified
-            characteristics.
+            characteristics, implementing node-variant graph filters.
 
     Forward call:
 
@@ -514,6 +1551,15 @@ class NodeVariantGNN(nn.Module):
         Output:
             y (torch.tensor): output data after being processed by the selection
                 GNN; shape: batchSize x dimLayersMLP[-1]
+                
+        Other methods:
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GNN y,
+        which is of shape batchSize x dimLayersMLP[-1], as well as the output
+        of all the GNN layers (i.e. before the MLP layers), yGNN of shape
+        batchSize x nSelectedNodes[-1] x dimFeatures[-1]. This can be used to
+        isolate the effect of graph filtering from the effect of the readout
+        layer.
     """
 
     def __init__(self,
@@ -526,7 +1572,7 @@ class NodeVariantGNN(nn.Module):
                  # MLP in the end
                  dimLayersMLP,
                  # Structure
-                 GSO):
+                 GSO, order = None):
         # Initialize parent:
         super().__init__()
         # dimNodeSignals should be a list and of size 1 more than the number of
@@ -559,7 +1605,21 @@ class NodeVariantGNN(nn.Module):
         # layer: this above is the list containing how many nodes are between
         # each layer.
         self.bias = bias # Boolean
-        self.S = torch.tensor(GSO)
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
         self.sigma = nonlinearity
         self.rho = poolingFunction
         self.alpha = poolingSize
@@ -610,20 +1670,33 @@ class NodeVariantGNN(nn.Module):
         # And we're done
         self.MLP = nn.Sequential(*fc)
         # so we finally have the architecture.
-
-    def forward(self, x):
+        
+    def splitForward(self, x):
         # Now we compute the forward call
         assert len(x.shape) == 3
         batchSize = x.shape[0]
         assert x.shape[1] == self.F[0]
         assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
         # Let's call the graph filtering layer
-        y = self.NVGFL(x)
+        y= self.NVGFL(x)
         # Flatten the output
-        y = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        yFlat = y.reshape(batchSize, self.F[-1] * self.N[-1])
         # And, feed it into the MLP
-        return self.MLP(y)
+        return self.MLP(yFlat), y
         # If self.MLP is a sequential on an empty list it just does nothing.
+        
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
 
     def to(self, device):
         # Because only the filter taps and the weights are registered as
@@ -649,18 +1722,21 @@ class EdgeVariantGNN(nn.Module):
                        nonlinearity, # Nonlinearity
                        nSelectedNodes, poolingFunction, poolingSize,
                        dimLayersMLP, # MLP in the end
-                       GSO) # Structure
+                       GSO, order = None) # Structure
 
         Input:
+            /** Graph filtering layers **/
             dimNodeSignals (list of int): dimension of the signals at each layer
+                (i.e. number of features at each node, or size of the vector
+                 supported at each node)
             nShiftTaps (list of int): number of shift taps on each layer
-                (information is gathered from up to the (nShiftTaps-1)-hop 
-                neighborhood)
+                (i.e. information is gathered from up to the (nShiftTaps-1)-hop
+                 neighborhood)
             nFilterNodes (list of int): number of nodes selected for the EV part
                 of the hybrid EV filtering (recall that the first ones in the
                 given permutation of S are the nodes selected; if any element in
                 nFilterNodes is equal to the number of nodes, then we have a
-                full edge-variant filter -as opposed to the hybrid EV-)
+                full edge-variant filter, not an hybrid one)
             bias (bool): include bias after graph filter on every layer
             >> Obs.: dimNodeSignals[0] is the number of features (the dimension
                 of the node signals) of the data, where dimNodeSignals[l] is the
@@ -668,7 +1744,11 @@ class EdgeVariantGNN(nn.Module):
                 Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
                 different, nShiftTaps[l] is the number of filter taps for the
                 filters implemented at layer l+1, thus len(nShiftTaps) = L.
+                
+            /** Activation function **/
             nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Pooling **/
             nSelectedNodes (list of int): number of nodes to keep after pooling
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
@@ -676,14 +1756,24 @@ class EdgeVariantGNN(nn.Module):
             poolingFunction (nn.Module in Utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
+                
+            /** Readout layer **/
             dimLayersMLP (list of int): number of output hidden units of a
                 sequence of fully connected layers after the graph filters have
                 been applied
+                
+            /** Graph structure **/
             GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
 
         Output:
             nn.Module with a Selection GNN architecture with the above specified
-            characteristics.
+            characteristics, implementing edge-variant graph filters.
 
     Forward call:
 
@@ -696,6 +1786,15 @@ class EdgeVariantGNN(nn.Module):
         Output:
             y (torch.tensor): output data after being processed by the selection
                 GNN; shape: batchSize x dimLayersMLP[-1]
+                
+    Other methods:
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GNN y,
+        which is of shape batchSize x dimLayersMLP[-1], as well as the output
+        of all the GNN layers (i.e. before the MLP layers), yGNN of shape
+        batchSize x nSelectedNodes[-1] x dimFeatures[-1]. This can be used to
+        isolate the effect of graph filtering from the effect of the readout
+        layer.
     """
 
     def __init__(self,
@@ -708,7 +1807,7 @@ class EdgeVariantGNN(nn.Module):
                  # MLP in the end
                  dimLayersMLP,
                  # Structure
-                 GSO):
+                 GSO, order = None):
         # Initialize parent:
         super().__init__()
         # dimNodeSignals should be a list and of size 1 more than the number of
@@ -742,7 +1841,21 @@ class EdgeVariantGNN(nn.Module):
         # layer: this above is the list containing how many nodes are between
         # each layer.
         self.bias = bias # Boolean
-        self.S = torch.tensor(GSO)
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
         self.sigma = nonlinearity
         self.rho = poolingFunction
         self.alpha = poolingSize
@@ -793,20 +1906,33 @@ class EdgeVariantGNN(nn.Module):
         # And we're done
         self.MLP = nn.Sequential(*fc)
         # so we finally have the architecture.
-
-    def forward(self, x):
+        
+    def splitForward(self, x):
         # Now we compute the forward call
         assert len(x.shape) == 3
         batchSize = x.shape[0]
         assert x.shape[1] == self.F[0]
         assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
         # Let's call the graph filtering layer
-        y = self.EVGFL(x)
+        y= self.EVGFL(x)
         # Flatten the output
-        y = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        yFlat = y.reshape(batchSize, self.F[-1] * self.N[-1])
         # And, feed it into the MLP
-        return self.MLP(y)
+        return self.MLP(yFlat), y
         # If self.MLP is a sequential on an empty list it just does nothing.
+        
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
 
     def to(self, device):
         # Because only the filter taps and the weights are registered as
@@ -820,6 +1946,319 @@ class EdgeVariantGNN(nn.Module):
         for l in range(self.L):
             self.EVGFL[3*l].addGSO(self.S)
             self.EVGFL[3*l+2].addGSO(self.S)
+            
+class ARMAfilterGNN(nn.Module):
+    """
+    ARMAfilterGNN: implements the GNN architecture using ARMA graph filters
+        by Jacobi's method.
+
+    Initialization:
+
+        ARMAfilterGNN(dimNodeSignals, nDenominatorTaps,
+                      nResidueTaps, bias, # Graph Filtering
+                      nonlinearity, # Nonlinearity
+                      nSelectedNodes, poolingFunction, poolingSize, # Pooling
+                      dimLayersMLP, # MLP in the end
+                      GSO, order = None, tMax = 5) # Structure
+
+        Input:
+            /** Graph filtering layers **/
+            dimNodeSignals (list of int): dimension of the signals at each layer
+                (i.e. number of features at each node, or size of the vector
+                 supported at each node)
+            nDenominatorTaps (list of int): number of filter taps in the 
+                denominator polynomial at each layer
+            nResidueTaps (list of int): number of filter taps in the residue
+                polynomial at each layer
+            bias (bool): include bias after graph filter on every layer
+            >> Obs.: dimNodeSignals[0] is the number of features (the dimension
+                of the node signals) of the data, where dimNodeSignals[l] is the
+                dimension obtained at the output of layer l, l=1,...,L.
+                Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
+                different, nResidueTaps[l] is the number of filter taps for the
+                filters implemented at layer l+1, thus len(nResidueTaps) = L.
+                Same holds for nDenominatorTaps.
+            
+            /** Activation function **/
+            nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Pooling **/
+            nSelectedNodes (list of int): number of nodes to keep after pooling
+                on each layer
+            >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
+                from the first element in the order specified by the given GSO
+            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingSize (list of int): size of the neighborhood to compute the
+                summary from at each layer
+                
+            /** Readout layer **/
+            dimLayersMLP (list of int): number of output hidden units of a
+                sequence of fully connected layers after the graph filters have
+                been applied
+            
+            /** Graph structure **/
+            GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
+            
+            /** Method specifics **/
+            tMax (int): how many iterations in the Jacobi method (default: 5)
+
+        Output:
+            nn.Module with a Selection GNN architecture with the above specified
+            characteristics, implementing ARMA filters.
+
+    Forward call:
+
+        ARMAfilterGNN(x)
+
+        Input:
+            x (torch.tensor): input data of shape
+                batchSize x dimFeatures x numberNodes
+
+        Output:
+            y (torch.tensor): output data after being processed by the GNN with
+                ARMA filters; shape: batchSize x dimLayersMLP[-1]
+                
+    Other methods:
+            
+        .changeGSO(S, nSelectedNodes = [], poolingSize = []): takes as input a
+        new graph shift operator S as a tensor of shape 
+            (dimEdgeFeatures x) numberNodes x numberNodes
+        Then, next time the SelectionGNN is run, it will run over the graph 
+        with GSO S, instead of running over the original GSO S. This is 
+        particularly useful when training on one graph, and testing on another
+        one. The number of selected nodes and the pooling size will not change
+        unless specifically consider those as input. Those lists need to have
+        the same length as the number of layers. There is no need to define
+        both, unless they change.
+        >> Obs.: The number of nodes in the GSOs need not be the same, but
+            unless we want to risk zero-padding beyond the original number
+            of nodes (which just results in disconnected nodes), then we might
+            want to update the nSelectedNodes and poolingSize accordingly, if
+            the size of the new GSO is different.
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GNN y,
+        which is of shape batchSize x dimLayersMLP[-1], as well as the output
+        of all the GNN layers (i.e. before the MLP layers), yGNN of shape
+        batchSize x nSelectedNodes[-1] x dimFeatures[-1]. This can be used to
+        isolate the effect of graph filtering from the effect of the readout
+        layer.
+    """
+
+    def __init__(self,
+                 # Graph filtering
+                 dimNodeSignals, nDenominatorTaps, nResidueTaps, bias,
+                 # Nonlinearity
+                 nonlinearity,
+                 # Pooling
+                 nSelectedNodes, poolingFunction, poolingSize,
+                 # MLP in the end
+                 dimLayersMLP,
+                 # Structure
+                 GSO, order = None, tMax = 5):
+        # Initialize parent:
+        super().__init__()
+        # dimNodeSignals should be a list and of size 1 more than nFilter taps.
+        assert len(dimNodeSignals) == len(nDenominatorTaps) + 1
+        assert len(dimNodeSignals) == len(nResidueTaps) + 1
+        # nSelectedNodes should be a list of size nFilterTaps, since the number
+        # of nodes in the first layer is always the size of the graph
+        assert len(nSelectedNodes) == len(nResidueTaps)
+        # poolingSize also has to be a list of the same size
+        assert len(poolingSize) == len(nResidueTaps)
+        # Check whether the GSO has features or not. After that, always handle
+        # it as a matrix of dimension E x N x N.
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        # Store the values (using the notation in the paper):
+        self.L = len(nResidueTaps) # Number of graph filtering layers
+        self.F = dimNodeSignals # Features
+        self.P = nDenominatorTaps # Denominator taps (order - 1)
+        self.K = nResidueTaps # Residue taps (order - 1)
+        self.E = GSO.shape[0] # Number of edge features
+        self.N = [GSO.shape[1]] + nSelectedNodes # Number of nodes
+        # See that we adding N_{0} = N as the number of nodes input the first
+        # layer: this above is the list containing how many nodes are between
+        # each layer.
+        self.bias = bias # Boolean
+        # Store the rest of the variables
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
+        self.sigma = nonlinearity
+        self.rho = poolingFunction
+        self.alpha = poolingSize
+        self.dimLayersMLP = dimLayersMLP
+        self.tMax = tMax
+        # And now, we're finally ready to create the architecture:
+        #\\\ Graph filtering layers \\\
+        # OBS.: We could join this for with the one before, but we keep separate
+        # for clarity of code.
+        gfl = [] # Graph Filtering Layers
+        for l in range(self.L):
+            #\\ Graph filtering stage:
+            gfl.append(gml.GraphFilterARMA(self.F[l], self.F[l+1],
+                                           self.P[l], self.K[l],
+                                           self.E, self.bias, self.tMax))
+            # There is a 3*l below here, because we have three elements per
+            # layer: graph filter, nonlinearity and pooling, so after each layer
+            # we're actually adding elements to the (sequential) list.
+            gfl[3*l].addGSO(self.S)
+            #\\ Nonlinearity
+            gfl.append(self.sigma())
+            #\\ Pooling
+            gfl.append(self.rho(self.N[l], self.N[l+1], self.alpha[l]))
+            # Same as before, this is 3*l+2
+            gfl[3*l+2].addGSO(self.S)
+        # And now feed them into the sequential
+        self.jARMA = nn.Sequential(*gfl) # Graph Filtering Layers
+        #\\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimLayersMLP) > 0: # Maybe we don't want to MLP anything
+            # The first layer has to connect whatever was left of the graph
+            # signal, flattened.
+            dimInputMLP = self.N[-1] * self.F[-1]
+            # (i.e., we have N[-1] nodes left, each one described by F[-1]
+            # features which means this will be flattened into a vector of size
+            # N[-1]*F[-1])
+            fc.append(nn.Linear(dimInputMLP, dimLayersMLP[0], bias = self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimLayersMLP)-1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.sigma())
+                # And add the linear layer
+                fc.append(nn.Linear(dimLayersMLP[l], dimLayersMLP[l+1],
+                                    bias = self.bias))
+        # And we're done
+        self.MLP = nn.Sequential(*fc)
+        # so we finally have the architecture.
+        
+    def changeGSO(self, GSO, nSelectedNodes = [], poolingSize = []):
+        
+        # We use this to change the GSO, using the same graph filters.
+        
+        # Check that the new GSO has the correct
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+            
+        # Get dataType and device of the current GSO, so when we replace it, it
+        # is still located in the same type and the same device.
+        dataType = self.S.dtype
+        if 'device' in dir(self.S):
+            device = self.S.device
+        else:
+            device = None
+        
+        # Reorder the new GSO
+        self.S, self.order = self.permFunction(GSO)
+        # Change data type and device as required
+        self.S = changeDataType(self.S, dataType)
+        if device is not None:
+            self.S = self.S.to(device)
+            
+        # Before making decisions, check if there is a new poolingSize list
+        if len(poolingSize) > 0:
+            # Check it has the right length
+            assert len(poolingSize) == self.L
+            # And update it
+            self.alpha = poolingSize
+        
+        # Now, check if we have a new list of nodes
+        if len(nSelectedNodes) > 0:
+            # If we do, then we need to change the pooling functions to select
+            # less nodes. This would allow to use graphs of different size.
+            # Note that the pooling function, there is nothing learnable, so
+            # they can easily be re-made, re-initialized.
+            # The first thing we need to check, is that the length of the
+            # number of nodes is equal to the number of layers (this list 
+            # indicates the number of nodes selected at the output of each
+            # layer)
+            assert len(nSelectedNodes) == self.L
+            # Then, update the N that we have stored
+            self.N = [GSO.shape[1]] + nSelectedNodes
+            # And get the new pooling functions
+            for l in range(self.L):
+                # For each layer, add the pooling function
+                self.jARMA[3*l+2] = self.rho(self.N[l], self.N[l+1],
+                                             self.alpha[l])
+                self.jARMA[3*l+2].addGSO(self.S)
+        else:
+            # Just update the GSO
+            for l in range(self.L):
+                self.jARMA[3*l+2].addGSO(self.S)
+        
+        # And update in the LSIGF that is still missing
+        for l in range(self.L):
+            self.jARMA[3*l].addGSO(self.S) # Graph convolutional layer
+        
+    def splitForward(self, x):
+        # Now we compute the forward call
+        assert len(x.shape) == 3
+        batchSize = x.shape[0]
+        assert x.shape[1] == self.F[0]
+        assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
+        # Let's call the graph filtering layer
+        y= self.jARMA(x)
+        # Flatten the output
+        yFlat = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        # And, feed it into the MLP
+        return self.MLP(yFlat), y
+        # If self.MLP is a sequential on an empty list it just does nothing.
+        
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
+
+    def to(self, device):
+        # Because only the filter taps and the weights are registered as
+        # parameters, when we do a .to(device) operation it does not move the
+        # GSOs. So we need to move them ourselves.
+        # Call the parent .to() method (to move the registered parameters)
+        super().to(device)
+        # Move the GSO
+        self.S = self.S.to(device)
+        # And all the other variables derived from it.
+        for l in range(self.L):
+            self.jARMA[3*l].addGSO(self.S)
+            self.jARMA[3*l+2].addGSO(self.S)
 
 class AggregationGNN(nn.Module):
     """
@@ -828,6 +2267,7 @@ class AggregationGNN(nn.Module):
     Initialization:
 
         Input:
+            /** Regular convolutional layers **/
             dimFeatures (list of int): number of features on each layer
             nFilterTaps (list of int): number of filter taps on each layer
             bias (bool): include bias after graph filter on every layer
@@ -837,20 +2277,37 @@ class AggregationGNN(nn.Module):
                 Therefore, for L layers, len(dimFeatures) = L+1. Slightly
                 different, nFilterTaps[l] is the number of filter taps for the
                 filters implemented at layer l+1, thus len(nFilterTaps) = L.
+                
+            /** Activation function **/
             nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Pooling **/
             poolingFunction (torch.nn): module from torch.nn pooling layers
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
+                
+            /** Readout layer **/
             dimLayersMLP (list of int): number of output hidden units of a
                 sequence of fully connected layers after the graph filters have
                 been applied
+                
+            /** Graph structure **/
             GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
             maxN (int): maximum number of neighborhood exchanges (default: None)
+            
+            /** Multiple nodes options (weight sharing) **/
             nNodes (int): number of nodes on which to compute the aggregation 
                 GNN (default: 1)
             dimLayersAggMLP (list of int): Once the information at each of the
                 nNodes selected is processed, then they are aggregated together
-                through this MLP (default: [] empty list)
+                through this MLP (default: [] empty list); note that using
+                this variable makes the architecture non-local.
             >> Obs.: The nodes selected to carry out the aggregation are those
                 corresponding to the first elements in the provided GSO.
             >> Obs.: If dimLayersAggMLP = [], the output is of shape
@@ -890,7 +2347,7 @@ class AggregationGNN(nn.Module):
                  # MLP in the end
                  dimLayersMLP,
                  # Structure
-                 GSO, maxN = None,
+                 GSO, order = None, maxN = None,
                  # Multiple nodes options
                  nNodes = 1, dimLayersAggMLP = []):
         super().__init__()
@@ -912,7 +2369,25 @@ class AggregationGNN(nn.Module):
         self.K = nFilterTaps # Filter taps
         self.E = GSO.shape[0]
         self.bias = bias # Boolean
-        self.S = torch.tensor(GSO)
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        GSO, self.order = self.permFunction(GSO)
+        # We need to keep GSO as the numpy version of the GSO and self.S as the
+        # torch version; this is because many of the upcoming operations on the
+        # GSO to define the structure are still in numpy.
+        self.S = GSO.copy()
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
         self.sigma = nonlinearity
         self.rho = poolingFunction
         self.alpha = poolingSize # This acts as both the kernel_size and the
@@ -1043,6 +2518,8 @@ class AggregationGNN(nn.Module):
         B = x.shape[0] # batch size
         assert x.shape[1] == self.F[0]
         assert x.shape[2] == self.SN.shape[2]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
         # So, up to here, we have:
         #   x of shape B x F x N
         F = x.shape[1]
@@ -1101,10 +2578,13 @@ class MultiNodeAggregationGNN(nn.Module):
     Initialization:
 
         Input:
+            /** External operation: Neighboring exchanges **/
             nSelectedNodes (list of int): number of selected nodes on each
                 outer layer
             nShifts (list of int): number of shifts to be done by the selected
                 nodes on each outer layer
+                
+            /** Internal operation: Regular convolution **/
             dimFeatures (list of list of int): the external list corresponds to
                 the outer layers, the inner list to how many features to process
                 on each inner layer (the aggregation GNN on each node)
@@ -1112,16 +2592,31 @@ class MultiNodeAggregationGNN(nn.Module):
                 the outer layers, the inner list to how many filter taps to
                 consider on each inner layer (the aggregation GNN on each node)
             bias (bool): include bias after graph filter on every layer
+            
+            /** Internal operation: Activation function **/
             nonlinearity (torch.nn): module from torch.nn non-linear activations
+            
+            /** Internal operation: Pooling **/
             poolingFunction (torch.nn): module from torch.nn pooling layers
             poolingSize (list of list of int): the external list corresponds to
                 the outer layers, the inner list to the size of the neighborhood
                 to compute the summary from at each inner layer (the aggregation
                 GNN on each node)
+                
+            /** Readout layer **/
             dimLayersMLP (list of int): number of output hidden units of a
                 sequence of fully connected layers after all the outer layers
-                have been computes
+                have been computed; note that using this layer makes the
+                whole architecture nonlinear.
+                
+            /** Graph structure **/
             GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
 
         Output:
             nn.Module with a Multi-Node Aggregation GNN architecture with the
@@ -1202,7 +2697,7 @@ class MultiNodeAggregationGNN(nn.Module):
                  #  MLP in the end
                  dimLayersMLP,
                  # Graph Structure
-                 GSO):
+                 GSO, order = None):
         # Initialize parent class
         super().__init__()
         # Check that we have an adequate GSO
@@ -1250,7 +2745,25 @@ class MultiNodeAggregationGNN(nn.Module):
         self.rho = poolingFunction # To use on every aggregation GNN
         self.alpha = poolingSize # Pooling size on each aggregation GNN
         self.dimLayersMLP = dimLayersMLP # MLP for each inner aggregation GNN
-        self.S = torch.tensor(GSO)
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        GSO, self.order = self.permFunction(GSO)
+        # We need to keep GSO as the numpy version of the GSO and self.S as the
+        # torch version; this is because many of the upcoming operations on the
+        # GSO to define the structure are still in numpy.
+        self.S = GSO.copy()
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
         # Now that there are several things to do next:
         # - The AggregationGNN module always selects the first node, so if we
         #   want to select the first R, then we have to reorder it ourselves
@@ -1274,8 +2787,8 @@ class MultiNodeAggregationGNN(nn.Module):
         # the indices so that each one of those P is first)
         # The order will be a list of lists, the outer list having as many 
         # elements as maximum of P.
-        self.order = [list(range(self.N))] # This is the order for the first
-        #   selected nodes which is, clearly, the identity order
+        self.innerOrder = [list(range(self.N))] # This is the order for the
+        #   first selected nodes which is, clearly, the identity order
         maxP = max(self.P) # Maximum number of nodes to consider
         for p in range(1, maxP):
             allNodes = list(range(self.N)) # Create a list of all the nodes in
@@ -1285,7 +2798,7 @@ class MultiNodeAggregationGNN(nn.Module):
             thisOrder = [p] #  Take the pth element, put it in a list
             thisOrder.extend(allNodes)
             # extend that list with all other nodes, except for the pth one.
-            self.order.append(thisOrder) # Store this in the order list
+            self.innerOrder.append(thisOrder) # Store this in the order list
         
         #\\\ Aggregation GNN stage:
         self.aggGNNmodules = nn.ModuleList() # List to hold the AggGNN modules
@@ -1295,7 +2808,7 @@ class MultiNodeAggregationGNN(nn.Module):
             self.aggGNNmodules.append(nn.ModuleList())
             # And start going through the inner modules
             for p in range(self.P[r]):
-                thisGSO = GSO[:,self.order[p],:][:,:,self.order[p]]
+                thisGSO = GSO[:,self.innerOrder[p],:][:,:,self.innerOrder[p]]
                 # # Reorder the GSO so that the selected node comes first and 
                 # is thus selected by the AggGNN module.
                 # Create the AggGNN module:
@@ -1344,6 +2857,8 @@ class MultiNodeAggregationGNN(nn.Module):
         batchSize = x.shape[0]
         assert x.shape[1] == self.F[0][0]
         assert x.shape[2] == self.N
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
         
         # Create an empty vector to store the output of the AggGNN of each node
         y = torch.empty(0).to(x.device)
@@ -1353,7 +2868,7 @@ class MultiNodeAggregationGNN(nn.Module):
             # For each node
             for p in range(self.P[r]):
                 # Re-order the nodes so that the selected nodes goes first
-                xReordered = x[:, :, self.order[p]]
+                xReordered = x[:, :, self.innerOrder[p]]
                 # Compute the output of each GNN
                 thisOutput = self.aggGNNmodules[r][p](xReordered)
                 # Add it to the corresponding nodes
@@ -1381,7 +2896,7 @@ class MultiNodeAggregationGNN(nn.Module):
         # Last layer: we do not need to zero pad afterwards, so we just compute
         # the output of the GNN for each node and store that
         for p in range(self.P[-1]):
-            xReordered = x[:, :, self.order[p]]
+            xReordered = x[:, :, self.innerOrder[p]]
             thisOutput = self.aggGNNmodules[-1][p](xReordered)
             y = torch.cat((y,thisOutput.unsqueeze(2)), dim = 2)
                 
@@ -1410,9 +2925,10 @@ class GraphAttentionNetwork(nn.Module):
                               nonlinearity, # Nonlinearity
                               nSelectedNodes, poolingFunction, poolingSize,
                               dimLayersMLP, bias, # MLP in the end
-                              GSO) # Structure
+                              GSO, order = None) # Structure
 
         Input:
+            /** Attention layers **/
             dimNodeSignals (list of int): dimension of the signals at each layer
             nAttentionHeads (list of int): number of attention heads on each
                 layer
@@ -1423,8 +2939,12 @@ class GraphAttentionNetwork(nn.Module):
                 different, nAttentionHeads[l] is the number of filter taps for
                 the filters implemented at layer l+1, thus
                 len(nAttentionHeads) = L.
+                
+            /** Activation function **/
             nonlinearity (torch.nn.functional): function from module
                 torch.nn.functional for non-linear activations
+                
+            /** Pooling **/
             nSelectedNodes (list of int): number of nodes to keep after pooling
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
@@ -1432,11 +2952,21 @@ class GraphAttentionNetwork(nn.Module):
             poolingFunction (nn.Module in Utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
+                
+            /** Readout layer **/
             dimLayersMLP (list of int): number of output hidden units of a
                 sequence of fully connected layers after the graph filters have
                 been applied
             bias (bool): include bias after each MLP layer
+            
+            /** Graph structure **/
             GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
 
         Output:
             nn.Module with a Graph Attention Network architecture with the
@@ -1465,7 +2995,7 @@ class GraphAttentionNetwork(nn.Module):
                  # MLP in the end
                  dimLayersMLP, bias,
                  # Structure
-                 GSO):
+                 GSO, order = None):
         # Initialize parent:
         super().__init__()
         # dimNodeSignals should be a list and of size 1 more than nFilter taps.
@@ -1492,7 +3022,21 @@ class GraphAttentionNetwork(nn.Module):
         # See that we adding N_{0} = N as the number of nodes input the first
         # layer: this above is the list containing how many nodes are between
         # each layer.
-        self.S = torch.tensor(GSO)
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
         self.sigma = nonlinearity # This has to be a nn.functional instead of
             # just a nn
         self.rho = poolingFunction
@@ -1588,6 +3132,8 @@ class GraphAttentionNetwork(nn.Module):
         batchSize = x.shape[0]
         assert x.shape[1] == self.F[0]
         assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
         # Let's call the graph attentional layers
         y = self.GAT(x)
         # Flatten the output
@@ -1608,3 +3154,545 @@ class GraphAttentionNetwork(nn.Module):
         for l in range(self.L):
             self.GAT[2*l].addGSO(self.S)
             self.GAT[2*l+1].addGSO(self.S)
+
+class GraphConvolutionAttentionNetwork(nn.Module):
+    """
+    GraphConvolutionAttentionNetwork: implement the graph convolution attention
+        network (GCAT) architecture
+
+    Initialization:
+
+        GraphConvolutionAttentionNetwork(dimNodeSignals, 
+                                         nFilterTaps,
+                                         nAttentionHeads,
+                                         bias, # Graph Filtering
+                                         nonlinearity, # Nonlinearity
+                                         nSelectedNodes,
+                                         poolingFunction, 
+                                         poolingSize,
+                                         dimLayersMLP, # MLP in the end
+                                         GSO, order = None) # Structure
+
+        Input:
+            /** Graph attention convolutional layers **/
+            dimNodeSignals (list of int): dimension of the signals at each layer
+            nFilterTaps (list of int): number of filter taps on each layer
+            nAttentionHeads (list of int): number of attention heads on each
+                layer
+            bias (bool): include bias after the graph filter on each layer
+            >> Obs.: dimNodeSignals[0] is the number of features (the dimension
+                of the node signals) of the data, where dimNodeSignals[l] is the
+                dimension obtained at the output of layer l, l=1,...,L.
+                Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
+                different, nAttentionHeads[l] is the number of filter taps for
+                the filters implemented at layer l+1, thus
+                len(nAttentionHeads) = L. Same for len(nFilterTaps) = L.
+                
+            /** Activation function **/
+            nonlinearity (torch.nn.functional): function from module
+                torch.nn.functional for non-linear activations
+                
+            /** Pooling **/
+            nSelectedNodes (list of int): number of nodes to keep after pooling
+                on each layer
+            >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
+                from the first element in the order specified by the given GSO
+            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingSize (list of int): size of the neighborhood to compute the
+                summary from at each layer
+                
+            /** Readout layer **/
+            dimLayersMLP (list of int): number of output hidden units of a
+                sequence of fully connected layers after the graph filters have
+                been applied
+                
+            /** Graph structure **/
+            GSO (np.array): graph shift operator of choice
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
+
+        Output:
+            nn.Module with a Graph Convolutional Attention Network architecture
+            with the above specified characteristics.
+
+    Forward call:
+
+        GraphConvolutionAttentionNetwork(x)
+
+        Input:
+            x (torch.tensor): input data of shape
+                batchSize x dimFeatures x numberNodes
+
+        Output:
+            y (torch.tensor): output data after being processed by the selection
+                GNN; shape: batchSize x dimLayersMLP[-1]
+    """
+
+    def __init__(self,
+                 # Graph attentional layer
+                 dimNodeSignals, nFilterTaps, nAttentionHeads, bias,
+                 # Nonlinearity (nn.functional)
+                 nonlinearity,
+                 # Pooling
+                 nSelectedNodes, poolingFunction, poolingSize,
+                 # MLP in the end
+                 dimLayersMLP,
+                 # Structure
+                 GSO, order = None):
+        # Initialize parent:
+        super().__init__()
+        # dimNodeSignals should be a list and of size 1 more than nFilterTaps
+        # and nAttentionHeads
+        assert len(dimNodeSignals) == len(nFilterTaps) + 1
+        assert len(dimNodeSignals) == len(nAttentionHeads) + 1
+        # nSelectedNodes should be a list of size nFilterTaps, since the number
+        # of nodes in the first layer is always the size of the graph
+        assert len(nSelectedNodes) == len(nAttentionHeads)
+        # poolingSize also has to be a list of the same size
+        assert len(poolingSize) == len(nAttentionHeads)
+        # Check whether the GSO has features or not. After that, always handle
+        # it as a matrix of dimension E x N x N.
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        # Store the values (using the notation in the paper):
+        self.L = len(nAttentionHeads) # Number of graph filtering layers
+        self.F = dimNodeSignals # Features
+        self.K = nFilterTaps # Number of filter taps
+        self.P = nAttentionHeads # Attention Heads
+        self.E = GSO.shape[0] # Number of edge features
+        self.N = [GSO.shape[1]] + nSelectedNodes # Number of nodes
+        # See that we adding N_{0} = N as the number of nodes input the first
+        # layer: this above is the list containing how many nodes are between
+        # each layer.
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
+        self.sigma = nonlinearity # This has to be a nn.functional instead of
+            # just a nn
+        self.rho = poolingFunction
+        self.alpha = poolingSize
+        self.dimLayersMLP = dimLayersMLP
+        self.bias = bias
+        # And now, we're finally ready to create the architecture:
+        #\\\ Graph Attentional Layers \\\
+        # OBS.: The last layer has to have concatenate False, whereas the rest
+        # have concatenate True. So we go all the way except for the last layer
+        gat = [] # Graph Attentional Layers
+        if self.L > 1:
+            # First layer (this goes separate because there are not attention
+            # heads increasing the number of features)
+            #\\ Graph attention stage:
+            gat.append(gml.GraphFilterAttentional(self.F[0],
+                                                  self.F[1],
+                                                  self.K[0],
+                                                  self.P[0],
+                                                  self.E,
+                                                  self.bias,
+                                                  self.sigma,
+                                                  True))
+            gat[0].addGSO(self.S)
+            #\\ Pooling
+            gat.append(self.rho(self.N[0], self.N[1], self.alpha[0]))
+            gat[1].addGSO(self.S)
+            # All the next layers (attention heads appear):
+            for l in range(1, self.L-1):
+                #\\ Graph attention stage:
+                gat.append(gml.GraphFilterAttentional(self.F[l] * self.P[l-1],
+                                                      self.F[l+1],
+                                                      self.K[l],
+                                                      self.P[l],
+                                                      self.E,
+                                                      self.bias,
+                                                      self.sigma,
+                                                      True))
+                # There is a 2*l below here, because we have two elements per
+                # layer: graph filter and pooling, so after each layer
+                # we're actually adding elements to the (sequential) list.
+                gat[2*l].addGSO(self.S)
+                #\\ Pooling
+                gat.append(self.rho(self.N[l], self.N[l+1], self.alpha[l]))
+                # Same as before, this is 2*l+1
+                gat[2*l+1].addGSO(self.S)
+            # And the last layer (set concatenate to False):
+            #\\ Graph attention stage:
+            gat.append(gml.GraphFilterAttentional(self.F[self.L-1] \
+                                                             * self.P[self.L-2],
+                                                  self.F[self.L],
+                                                  self.K[self.L-1],
+                                                  self.P[self.L-1],
+                                                  self.E,
+                                                  self.bias,
+                                                  self.sigma,
+                                                  False))
+            gat[2* (self.L - 1)].addGSO(self.S)
+            #\\ Pooling
+            gat.append(self.rho(self.N[self.L-1], self.N[self.L],
+                                self.alpha[self.L-1]))
+            gat[2* (self.L - 1) +1].addGSO(self.S)
+        else:
+            # If there's only one layer, it just go straightforward, adding a
+            # False to the concatenation and no increase in the input features
+            # due to attention heads
+            gat.append(gml.GraphFilterAttentional(self.F[0],
+                                                  self.F[1],
+                                                  self.K[0],
+                                                  self.P[0],
+                                                  self.E,
+                                                  self.bias,
+                                                  self.sigma,
+                                                  False))
+            gat[0].addGSO(self.S)
+            #\\ Pooling
+            gat.append(self.rho(self.N[0], self.N[1], self.alpha[0]))
+            gat[1].addGSO(self.S)
+        # And now feed them into the sequential
+        self.GCAT = nn.Sequential(*gat) # Graph Attentional Layers
+        #\\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimLayersMLP) > 0: # Maybe we don't want to MLP anything
+            # The first layer has to connect whatever was left of the graph
+            # signal, flattened.
+            # NOTE: Because sigma is a functional, instead of the layer, then
+            # we need to pick up the layer for the MLP part.
+            if str(self.sigma).find('relu') >= 0:
+                self.sigmaMLP = nn.ReLU()
+            elif str(self.sigma).find('tanh') >= 0:
+                self.sigmaMLP = nn.Tanh()
+                
+            dimInputMLP = self.N[-1] * self.F[-1]
+            # (i.e., we have N[-1] nodes left, each one described by F[-1]
+            # features which means this will be flattened into a vector of size
+            # N[-1]*F[-1])
+            fc.append(nn.Linear(dimInputMLP, dimLayersMLP[0], bias = self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimLayersMLP)-1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.sigmaMLP())
+                # And add the linear layer
+                fc.append(nn.Linear(dimLayersMLP[l], dimLayersMLP[l+1],
+                                    bias = self.bias))
+        # And we're done
+        self.MLP = nn.Sequential(*fc)
+        # so we finally have the architecture.
+
+    def forward(self, x):
+        # Now we compute the forward call
+        assert len(x.shape) == 3
+        batchSize = x.shape[0]
+        assert x.shape[1] == self.F[0]
+        assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
+        # Let's call the graph attentional layers
+        y = self.GCAT(x)
+        # Flatten the output
+        y = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        # And, feed it into the MLP
+        return self.MLP(y)
+        # If self.MLP is a sequential on an empty list it just does nothing.
+
+    def to(self, device):
+        # Because only the filter taps and the weights are registered as
+        # parameters, when we do a .to(device) operation it does not move the
+        # GSOs. So we need to move them ourselves.
+        # Call the parent .to() method (to move the registered parameters)
+        super().to(device)
+        # Move the GSO
+        self.S = self.S.to(device)
+        # And all the other variables derived from it.
+        for l in range(self.L):
+            self.GCAT[2*l].addGSO(self.S)
+            self.GCAT[2*l+1].addGSO(self.S)
+            
+class EdgeVariantAttention(nn.Module):
+    """
+    EdgeVariantAttention: implement the edge variant graph filter, with 
+        coefficients learned following a parameterization given by the 
+        attention mechanism
+
+    Initialization:
+
+        EdgeVariantAttention(dimNodeSignals, nFilterTaps,
+                             nAttentionHeads, bias, # Graph Filtering
+                             nonlinearity, # Nonlinearity
+                             nSelectedNodes, poolingFunction, poolingSize,
+                             dimLayersMLP, # MLP in the end
+                             GSO, order = None) # Structure
+
+        Input:
+            /** Graph attention filtering layer **/
+            dimNodeSignals (list of int): dimension of the signals at each layer
+            nFilterTaps (list of int): number of filter taps on each layer
+            nAttentionHeads (list of int): number of attention heads on each
+                layer
+            bias (bool): include bias after the graph filter on each layer
+            >> Obs.: dimNodeSignals[0] is the number of features (the dimension
+                of the node signals) of the data, where dimNodeSignals[l] is the
+                dimension obtained at the output of layer l, l=1,...,L.
+                Therefore, for L layers, len(dimNodeSignals) = L+1. Slightly
+                different, nAttentionHeads[l] is the number of filter taps for
+                the filters implemented at layer l+1, thus
+                len(nAttentionHeads) = L. Same for len(nFilterTaps) = L.
+                
+            /** Activation function **/
+            nonlinearity (torch.nn.functional): function from module
+                torch.nn.functional for non-linear activations
+                
+            /** Pooling **/
+            nSelectedNodes (list of int): number of nodes to keep after pooling
+                on each layer
+            >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
+                from the first element in the order specified by the given GSO
+            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingSize (list of int): size of the neighborhood to compute the
+                summary from at each layer
+                
+            /** Readout layer **/
+            dimLayersMLP (list of int): number of output hidden units of a
+                sequence of fully connected layers after the graph filters have
+                been applied
+                
+            /** Graph structure **/
+            GSO (np.array): graph shift operator of choice.
+            order (string or None, default = None): determine the criteria to
+                use when reordering the nodes (i.e. for pooling reasons); the
+                string has to be such that there is a function named 
+                'perm' + order in Utils.graphTools that takes as input the GSO
+                and returns a new GSO ordered by the specified criteria and
+                an order array
+
+        Output:
+            nn.Module with an edge variant graph filter whose coefficients are
+            parameterized by an attention mechanism
+
+    Forward call:
+
+        EdgeVariantAttention(x)
+
+        Input:
+            x (torch.tensor): input data of shape
+                batchSize x dimFeatures x numberNodes
+
+        Output:
+            y (torch.tensor): output data after being processed by the selection
+                GNN; shape: batchSize x dimLayersMLP[-1]
+    """
+
+    def __init__(self,
+                 # Graph attentional layer
+                 dimNodeSignals, nFilterTaps, nAttentionHeads, bias,
+                 # Nonlinearity (nn.functional)
+                 nonlinearity,
+                 # Pooling
+                 nSelectedNodes, poolingFunction, poolingSize,
+                 # MLP in the end
+                 dimLayersMLP,
+                 # Structure
+                 GSO, order = None):
+        # Initialize parent:
+        super().__init__()
+        # dimNodeSignals should be a list and of size 1 more than nFilter taps.
+        assert len(dimNodeSignals) == len(nFilterTaps) + 1
+        assert len(dimNodeSignals) == len(nAttentionHeads) + 1
+        # nSelectedNodes should be a list of size nFilterTaps, since the number
+        # of nodes in the first layer is always the size of the graph
+        assert len(nSelectedNodes) == len(nAttentionHeads)
+        # poolingSize also has to be a list of the same size
+        assert len(poolingSize) == len(nAttentionHeads)
+        # Check whether the GSO has features or not. After that, always handle
+        # it as a matrix of dimension E x N x N.
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        # Store the values (using the notation in the paper):
+        self.L = len(nAttentionHeads) # Number of graph filtering layers
+        self.F = dimNodeSignals # Features
+        self.K = nFilterTaps # Filter taps
+        self.P = nAttentionHeads # Attention Heads
+        self.E = GSO.shape[0] # Number of edge features
+        self.N = [GSO.shape[1]] + nSelectedNodes # Number of nodes
+        # See that we adding N_{0} = N as the number of nodes input the first
+        # layer: this above is the list containing how many nodes are between
+        # each layer.
+        if order is not None:
+            # If there's going to be reordering, then the value of the
+            # permutation function will be given by the criteria in 
+            # self.reorder. For instance, if self.reorder = 'Degree', then
+            # we end up calling the function Utils.graphTools.permDegree.
+            # We need to be sure that the function 'perm' + self.reorder
+            # is available in the Utils.graphTools module.
+            self.permFunction = eval('Utils.graphTools.perm' + order)
+        else:
+            self.permFunction = Utils.graphTools.permIdentity
+            # This is overriden if coarsening is selected, since the ordering
+            # function is native to that pooling method.
+        self.S, self.order = self.permFunction(GSO)
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
+        self.sigma = nonlinearity # This has to be a nn.functional instead of
+            # just a nn
+        self.rho = poolingFunction
+        self.alpha = poolingSize
+        self.dimLayersMLP = dimLayersMLP
+        self.bias = bias
+        # And now, we're finally ready to create the architecture:
+        #\\\ Graph Attentional Layers \\\
+        # OBS.: The last layer has to have concatenate False, whereas the rest
+        # have concatenate True. So we go all the way except for the last layer
+        gat = [] # Graph Attentional Layers
+        if self.L > 1:
+            # First layer (this goes separate because there are not attention
+            # heads increasing the number of features)
+            #\\ Graph attention stage:
+            gat.append(gml.EdgeVariantAttentional(self.F[0],
+                                                  self.F[1],
+                                                  self.K[0],
+                                                  self.P[0],
+                                                  self.E,
+                                                  self.bias,
+                                                  self.sigma,
+                                                  True))
+            gat[0].addGSO(self.S)
+            #\\ Pooling
+            gat.append(self.rho(self.N[0], self.N[1], self.alpha[0]))
+            gat[1].addGSO(self.S)
+            # All the next layers (attention heads appear):
+            for l in range(1, self.L-1):
+                #\\ Graph attention stage:
+                gat.append(gml.EdgeVariantAttentional(self.F[l]*self.P[l-1],
+                                                      self.F[l+1],
+                                                      self.K[l],
+                                                      self.P[l],
+                                                      self.E,
+                                                      self.bias,
+                                                      self.sigma,
+                                                      True))
+                # There is a 2*l below here, because we have two elements per
+                # layer: graph filter and pooling, so after each layer
+                # we're actually adding elements to the (sequential) list.
+                gat[2*l].addGSO(self.S)
+                #\\ Pooling
+                gat.append(self.rho(self.N[l], self.N[l+1], self.alpha[l]))
+                # Same as before, this is 2*l+1
+                gat[2*l+1].addGSO(self.S)
+            # And the last layer (set concatenate to False):
+            #\\ Graph attention stage:
+            gat.append(gml.EdgeVariantAttentional(self.F[self.L-1] \
+                                                             * self.K[self.L-2],
+                                                  self.F[self.L],
+                                                  self.K[self.L-1],
+                                                  self.P[self.L-1],
+                                                  self.E,
+                                                  self.bias,
+                                                  self.sigma,
+                                                  False))
+            gat[2* (self.L - 1)].addGSO(self.S)
+            #\\ Pooling
+            gat.append(self.rho(self.N[self.L-1], self.N[self.L],
+                                self.alpha[self.L-1]))
+            gat[2* (self.L - 1) +1].addGSO(self.S)
+        else:
+            # If there's only one layer, it just go straightforward, adding a
+            # False to the concatenation and no increase in the input features
+            # due to attention heads
+            gat.append(gml.EdgeVariantAttentional(self.F[0],
+                                                  self.F[1],
+                                                  self.K[0],
+                                                  self.P[0],
+                                                  self.E,
+                                                  self.bias,
+                                                  self.sigma,
+                                                  False))
+            gat[0].addGSO(self.S)
+            #\\ Pooling
+            gat.append(self.rho(self.N[0], self.N[1], self.alpha[0]))
+            gat[1].addGSO(self.S)
+        # And now feed them into the sequential
+        self.EVGAT = nn.Sequential(*gat) # Graph Attentional Layers
+        #\\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimLayersMLP) > 0: # Maybe we don't want to MLP anything
+            # The first layer has to connect whatever was left of the graph
+            # signal, flattened.
+            # NOTE: Because sigma is a functional, instead of the layer, then
+            # we need to pick up the layer for the MLP part.
+            if str(self.sigma).find('relu') >= 0:
+                self.sigmaMLP = nn.ReLU()
+            elif str(self.sigma).find('tanh') >= 0:
+                self.sigmaMLP = nn.Tanh()
+                
+            dimInputMLP = self.N[-1] * self.F[-1]
+            # (i.e., we have N[-1] nodes left, each one described by F[-1]
+            # features which means this will be flattened into a vector of size
+            # N[-1]*F[-1])
+            fc.append(nn.Linear(dimInputMLP, dimLayersMLP[0], bias = self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimLayersMLP)-1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.sigmaMLP())
+                # And add the linear layer
+                fc.append(nn.Linear(dimLayersMLP[l], dimLayersMLP[l+1],
+                                    bias = self.bias))
+        # And we're done
+        self.MLP = nn.Sequential(*fc)
+        # so we finally have the architecture.
+
+    def forward(self, x):
+        # Now we compute the forward call
+        assert len(x.shape) == 3
+        batchSize = x.shape[0]
+        assert x.shape[1] == self.F[0]
+        assert x.shape[2] == self.N[0]
+        # Reorder
+        x = x[:, :, self.order] # B x F x N
+        # Let's call the graph attentional layers
+        y = self.EVGAT(x)
+        # Flatten the output
+        y = y.reshape(batchSize, self.F[-1] * self.N[-1])
+        # And, feed it into the MLP
+        return self.MLP(y)
+        # If self.MLP is a sequential on an empty list it just does nothing.
+
+    def to(self, device):
+        # Because only the filter taps and the weights are registered as
+        # parameters, when we do a .to(device) operation it does not move the
+        # GSOs. So we need to move them ourselves.
+        # Call the parent .to() method (to move the registered parameters)
+        super().to(device)
+        # Move the GSO
+        self.S = self.S.to(device)
+        # And all the other variables derived from it.
+        for l in range(self.L):
+            self.EVGAT[2*l].addGSO(self.S)
+            self.EVGAT[2*l+1].addGSO(self.S)

@@ -1,5 +1,6 @@
-# 2018/10/02~2018/07/12
+# 2018/10/02~
 # Fernando Gama, fgama@seas.upenn.edu
+# Luana Ruiz, rubruiz@seas.upenn.edu
 """
 model.py Model Module
 
@@ -14,8 +15,6 @@ import numpy as np
 import pickle
 import datetime
 
-from scipy.io import savemat
-
 class Model:
     """
     Binds together in one class the architecture, the loss function and the
@@ -29,10 +28,9 @@ class Model:
     optim: torch optimizer
     name: model name
     saveDir: directory to save the model into
-    order: order of nodes (needed to match the data to the GSO ordering)
     nParameters: number of learnable parameters
         >> Obs.: the nParameters count is not accurate if filters are 
-            Edge-Variant or Hybrid Edge-Variant
+            Edge-Variant
 
     Methods:
 
@@ -120,7 +118,7 @@ class Model:
     
     Which prints the evaluation result and stores it in the output variables.
     """
-    def __init__(self, architecture, loss, optimizer, name, saveDir, order):
+    def __init__(self, architecture, loss, optimizer, name, saveDir):
         self.archit = architecture
         self.nParameters = 0
         # Count parameters:
@@ -136,7 +134,6 @@ class Model:
         self.optim = optimizer
         self.name = name
         self.saveDir = saveDir
-        self.order = order
         self.trainingOptions = None
 
     def save(self, label = '', **kwargs):
@@ -226,6 +223,17 @@ class Model:
             from Utils.visualTools import Visualizer
             logsTB = os.path.join(self.saveDir, self.name + '-logsTB')
             logger = Visualizer(logsTB, name='visualResults')
+        else:
+            logger = None
+
+        # Get the device we're working on
+        device = None # Not set
+        params = list(self.archit.parameters())
+        thisDevice = params[0].device
+        if device is None:
+            device = thisDevice
+        else:
+            assert device == thisDevice
 
         ###########################################
         # DATA INPUT (pick up on data parameters) #
@@ -355,10 +363,8 @@ class Model:
                                             : batchIndex[batch+1]]
                 # Get the samples
                 xTrain, yTrain = data.getSamples('train', thisBatchIndices)
-                xTrain = xTrain.unsqueeze(1) # To account for just F=1 feature
-
-                # Set the ordering
-                xTrainOrdered = xTrain[:,:,self.order] # B x F x N
+                xTrain = xTrain.to(device)
+                yTrain = yTrain.to(device)
                 
                 # Start measuring time
                 startTime = datetime.datetime.now()
@@ -367,7 +373,7 @@ class Model:
                 self.archit.zero_grad()
 
                 # Obtain the output of the GNN
-                yHatTrain = self.archit(xTrainOrdered)
+                yHatTrain = self.archit(xTrain)
 
                 # Compute loss
                 lossValueTrain = self.loss(yHatTrain, yTrain)
@@ -406,6 +412,12 @@ class Model:
                         print("(E: %2d, B: %3d) %6.4f / %7.4f - %6.4fs" % (
                                 epoch+1, batch+1, accTrain,
                                 lossValueTrain.item(), timeElapsed))
+                
+                # Delete variables to free space in CUDA memory
+                del xTrain
+                del yTrain
+                del lossValueTrain
+                del accTrain
 
                 #\\\\\\\
                 #\\\ TB LOGGING (for each batch)
@@ -424,10 +436,8 @@ class Model:
                 if (epoch * nBatches + batch) % validationInterval == 0:
                     # Validation:
                     xValid, yValid = data.getSamples('valid')
-                    xValid = xValid.unsqueeze(1) # Add the F dimension: BxFxN
-
-                    # Set the ordering
-                    xValidOrdered = xValid[:,:,self.order] # BxFxN
+                    xValid = xValid.to(device)
+                    yValid = yValid.to(device)
                     
                     # Start measuring time
                     startTime = datetime.datetime.now()
@@ -437,7 +447,7 @@ class Model:
                     # account to update the learnable parameters.
                     with torch.no_grad():
                         # Obtain the output of the GNN
-                        yHatValid = self.archit(xValidOrdered)
+                        yHatValid = self.archit(xValid)
 
                         # Compute loss
                         lossValueValid = self.loss(yHatValid, yValid)
@@ -465,6 +475,11 @@ class Model:
                         print("[VALIDATION] %6.4f / %7.4f - %6.4fs" % (
                                 accValid.item(), lossValueValid.item(),
                                 timeElapsed))
+                        
+                    # Delete variables to free space in CUDA memory
+                    del xValid
+                    del yValid
+                    del lossValueValid
 
                     if doLogging:
                         logger.scalar_summary(mode = 'Validation',
@@ -529,8 +544,7 @@ class Model:
         #################
 
         if doSaveVars:
-            # We convert the lists into np.arrays to be handled by both 
-            # Matlab(R) and matplotlib
+            # We convert the lists into np.arrays
             self.lossTrain = np.array(lossTrain)
             self.evalTrain = np.array(evalTrain)
             self.lossValid = np.array(lossValid)
@@ -552,18 +566,6 @@ class Model:
                      'lossValid': lossValid,
                      'evalValid': evalValid
                      }, trainVarsFile)
-            # And because of the SP background, why not save it in matlab too?
-            pathToMat = os.path.join(saveDirVars, 'trainVars.mat')
-            varsMatlab = {}
-            varsMatlab['nEpochs'] = nEpochs
-            varsMatlab['nBatches'] = nBatches
-            varsMatlab['batchSize'] = np.array(batchSize)
-            varsMatlab['batchIndex'] = np.array(batchIndex)
-            varsMatlab['lossTrain'] = self.lossTrain
-            varsMatlab['evalTrain'] = self.evalTrain
-            varsMatlab['lossValid'] = self.lossValid
-            varsMatlab['evalValid'] = self.evalValid
-            savemat(pathToMat, varsMatlab)
 
         # Now, if we didn't do any training (i.e. nEpochs = 0), then the last is
         # also the best.
@@ -585,13 +587,23 @@ class Model:
                     bestEpoch + 1, bestBatch + 1, bestScore))
 
     def evaluate(self, data):
+    
+        # Get the device we're working on
+        device = None # Not set
+        params = list(self.archit.parameters())
+        thisDevice = params[0].device
+        if device is None:
+            device = thisDevice
+        else:
+            assert device == thisDevice
+    
         ########
         # DATA #
         ########
 
         xTest, yTest = data.getSamples('test')
-        # Update order and adapt dimensions
-        xTestOrdered = xTest[:,self.order].unsqueeze(1)
+        xTest = xTest.to(device)
+        yTest = yTest.to(device)
 
         ##############
         # BEST MODEL #
@@ -604,11 +616,13 @@ class Model:
 
         with torch.no_grad():
             # Process the samples
-            yHatTest = self.archit(xTestOrdered)
+            yHatTest = self.archit(xTest)
             # yHatTest is of shape
             #   testSize x numberOfClasses
             # We compute the accuracy
             accBest = data.evaluate(yHatTest, yTest)
+            
+        del yHatTest
 
         if self.trainingOptions['doPrint']:
             print("Evaluation (Best): %4.2f%%" % accBest)
@@ -621,7 +635,7 @@ class Model:
 
         with torch.no_grad():
             # Process the samples
-            yHatTest = self.archit(xTestOrdered)
+            yHatTest = self.archit(xTest)
             # yHatTest is of shape
             #   testSize x numberOfClasses
             # We compute the accuracy
@@ -629,6 +643,8 @@ class Model:
 
         if self.trainingOptions['doPrint']:
             print("Evaluation (Last): %4.2f%%" % accLast)
+            
+        del xTest, yTest, yHatTest
             
         return accBest, accLast
 

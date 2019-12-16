@@ -1,9 +1,15 @@
-# 2018/12/4~~2018/07/12
+# 2018/12/04~
 # Fernando Gama, fgama@seas.upenn.edu
+# Luana Ruiz, rubruiz@seas.upenn.edu
 """
 dataTools.py Data management module
 
-Several tools to manage data
+Functions:
+    
+normalizeData: normalize data along a specified axis
+changeDataType: change data type of data
+
+Classes (datasets):
 
 FacebookEgo (class): loads the Facebook adjacency matrix of EgoNets
 SourceLocalization (class): creates the datasets for a source localization 
@@ -11,14 +17,7 @@ SourceLocalization (class): creates the datasets for a source localization
 Authorship (class): loads and splits the dataset for the authorship attribution
     problem
 MovieLens (class): Loads and handles handles the MovieLens-100k dataset
-TwentyNews (class): handles the 20NEWS dataset
 """
-## IMPORTANT NOTE (gensim): The 20NEWS dataset relies on the gensim library.
-# I have found several issues with this library, so in this release, the 
-# importing of this library has been commented. Please, uncomment it, and be
-# sure to have it installed before using the 20NEWS dataset.
-# (The importing line is located below the TwentyNews class, where all the
-# auxiliary functions are defined)
 
 import os
 import pickle
@@ -35,12 +34,96 @@ import Utils.graphTools as graph
 
 zeroTolerance = 1e-9 # Values below this number are considered zero.
 
+def normalizeData(x, ax):
+    """
+    normalizeData(x, ax): normalize data x (subtract mean and divide by standard 
+    deviation) along the specified axis ax
+    """
+    
+    thisShape = x.shape # get the shape
+    assert ax < len(thisShape) # check that the axis that we want to normalize
+        # is there
+    dataType = type(x) # get data type so that we don't have to convert
+
+    if 'numpy' in repr(dataType):
+
+        # Compute the statistics
+        xMean = np.mean(x, axis = ax)
+        xDev = np.std(x, axis = ax)
+        # Add back the dimension we just took out
+        xMean = np.expand_dims(xMean, ax)
+        xDev = np.expand_dims(xDev, ax)
+
+    elif 'torch' in repr(dataType):
+
+        # Compute the statistics
+        xMean = torch.mean(x, dim = ax)
+        xDev = torch.std(x, dim = ax)
+        # Add back the dimension we just took out
+        xMean = xMean.unsqueeze(ax)
+        xDev = xDev.unsqueeze(ax)
+
+    # Subtract mean and divide by standard deviation
+    x = (x - xMean) / xDev
+
+    return x
+
+def changeDataType(x, dataType):
+    """
+    changeDataType(x, dataType): change the dataType of variable x into dataType
+    """
+    
+    # So this is the thing: To change data type it depends on both, what dtype
+    # the variable already is, and what dtype we want to make it.
+    # Torch changes type by .type(), but numpy by .astype()
+    # If we have already a torch defined, and we apply a torch.tensor() to it,
+    # then there will be warnings because of gradient accounting.
+    
+    # All of these facts make changing types considerably cumbersome. So we
+    # create a function that just changes type and handles all this issues
+    # inside.
+    
+    # If we can't recognize the type, we just make everything numpy.
+    
+    # Check if the variable has an argument called 'dtype' so that we can now
+    # what type of data type the variable is
+    if 'dtype' in dir(x):
+        varType = x.dtype
+    
+    # So, let's start assuming we want to convert to numpy
+    if 'numpy' in repr(dataType):
+        # Then, the variable con be torch, in which case we move it to cpu, to
+        # numpy, and convert it to the right type.
+        if 'torch' in repr(varType):
+            x = x.cpu().numpy().astype(dataType)
+        # Or it could be numpy, in which case we just use .astype
+        elif 'numpy' in repr(type(x)):
+            x = x.astype(dataType)
+    # Now, we want to convert to torch
+    elif 'torch' in repr(dataType):
+        # If the variable is torch in itself
+        if 'torch' in repr(varType):
+            x = x.type(dataType)
+        # But, if it's numpy
+        elif 'numpy' in repr(type(x)):
+            x = torch.tensor(x, dtype = dataType)
+            
+    # This only converts between numpy and torch. Any other thing is ignored
+    return x
+
 class _data:
     # Internal supraclass from which all data sets will inherit.
     # There are certain methods that all Data classes must have:
-    #   getSamples(), to() and astype().
+    #   getSamples(), expandDims(), to() and astype().
     # To avoid coding this methods over and over again, we create a class from
     # which the data can inherit this basic methods.
+    
+    # All the signals are always assumed to be graph signals that are written
+    #   nDataPoints (x nFeatures) x nNodes
+    # If we have one feature, we have the expandDims() that adds a x1 so that
+    # it can be readily processed by architectures/functions that always assume
+    # a 3-dimensional signal.
+    
     def __init__(self):
         # Minimal set of attributes that all data classes should have
         self.dataType = None
@@ -51,13 +134,13 @@ class _data:
         self.samples = {}
         self.samples['train'] = {}
         self.samples['train']['signals'] = None
-        self.samples['train']['labels'] = None
+        self.samples['train']['targets'] = None
         self.samples['valid'] = {}
         self.samples['valid']['signals'] = None
-        self.samples['valid']['labels'] = None
+        self.samples['valid']['targets'] = None
         self.samples['test'] = {}
         self.samples['test']['signals'] = None
-        self.samples['test']['labels'] = None
+        self.samples['test']['targets'] = None
         
     def getSamples(self, samplesType, *args):
         # type: train, valid, test
@@ -71,7 +154,7 @@ class _data:
         assert len(args) <= 1
         # If there are no arguments, just return all the desired samples
         x = self.samples[samplesType]['signals']
-        y = self.samples[samplesType]['labels']
+        y = self.samples[samplesType]['targets']
         # If there's an argument, we have to check whether it is an int or a
         # list
         if len(args) == 1:
@@ -84,71 +167,91 @@ class _data:
                 # Randomly choose args[0] indices
                 selectedIndices = np.random.choice(nSamples, size = args[0],
                                                    replace = False)
-                # The reshape is to avoid squeezing if only one sample is
-                # requested
-                x = x[selectedIndices,:].reshape([args[0], x.shape[1]])
+                # Select the corresponding samples
+                xSelected = x[selectedIndices]
                 y = y[selectedIndices]
             else:
                 # The fact that we put else here instead of elif type()==list
                 # allows for np.array to be used as indices as well. In general,
                 # any variable with the ability to index.
-                x = x[args[0], :]
-                # If only one element is selected, avoid squeezing. Given that
-                # the element can be a list (which has property len) or an
-                # np.array (which doesn't have len, but shape), then we can
-                # only avoid squeezing if we check that it has been sequeezed
-                # (or not)
-                if len(x.shape) == 1:
-                    x = x.reshape([1, x.shape[0]])
+                xSelected = x[args[0]]
                 # And assign the labels
                 y = y[args[0]]
+                
+            # If we only selected a single element, then the nDataPoints dim
+            # has been left out. So if we have less dimensions, we have to
+            # put it back
+            if len(xSelected.shape) < len(x.shape):
+                if 'torch' in self.dataType:
+                    x = xSelected.unsqueeze(0)
+                else:
+                    x = np.expand_dims(xSelected, axis = 0)
+            else:
+                x = xSelected
 
         return x, y
-
+    
+    def expandDims(self):
+        
+        # For each data set partition
+        for key in self.samples.keys():
+            # If there's something in them
+            if self.samples[key]['signals'] is not None:
+                # And if it has only two dimensions
+                #   (shape: nDataPoints x nNodes)
+                if len(self.samples[key]['signals'].shape) == 2:
+                    # Then add a third dimension in between so that it ends
+                    # up with shape
+                    #   nDataPoints x 1 x nNodes
+                    # and it respects the 3-dimensional format that is taken
+                    # by many of the processing functions
+                    if 'torch' in repr(self.dataType):
+                        self.samples[key]['signals'] = \
+                                       self.samples[key]['signals'].unsqueeze(1)
+                    else:
+                        self.samples[key]['signals'] = np.expand_dims(
+                                                   self.samples[key]['signals'],
+                                                   axis = 1)
+        
     def astype(self, dataType):
         # This changes the type for the minimal attributes (samples). This 
         # methods should still be initialized within the data classes, if more
         # attributes are used.
         
         # The labels could be integers as created from the dataset, so if they
-        # are, we need to be sure they are integers. To do this we need to
-        # match the desired dataType to its int counterpart. Typical examples
-        # are:
+        # are, we need to be sure they are integers also after conversion. 
+        # To do this we need to match the desired dataType to its int 
+        # counterpart. Typical examples are:
         #   numpy.float64 -> numpy.int64
         #   numpy.float32 -> numpy.int32
         #   torch.float64 -> torch.int64
         #   torch.float32 -> torch.int32
         
-        labelType = str(self.samples['train']['labels'].dtype)
-        if 'int' in labelType:
-            if 'numpy' in repr(dataType) or 'np' in repr(dataType):
-                if '64' in labelType:
-                    labelType = np.int64
-                elif '32' in labelType:
-                    labelType = np.int32
+        targetType = str(self.samples['train']['targets'].dtype)
+        if 'int' in targetType:
+            if 'numpy' in repr(dataType):
+                if '64' in targetType:
+                    targetType = np.int64
+                elif '32' in targetType:
+                    targetType = np.int32
             elif 'torch' in repr(dataType):
-                if '64' in labelType:
-                    labelType = torch.int64
-                elif '32' in labelType:
-                    labelType = torch.int32
+                if '64' in targetType:
+                    targetType = torch.int64
+                elif '32' in targetType:
+                    targetType = torch.int32
         else: # If there is no int, just stick with the given dataType
-            labelType = dataType
+            targetType = dataType
         
         # Now that we have selected the dataType, and the corresponding
         # labelType, we can proceed to convert the data into the corresponding
         # type
-        if 'torch' in repr(dataType): # If it is torch
-            for key in self.samples.keys():
-                self.samples[key]['signals'] = \
-                       torch.tensor(self.samples[key]['signals']).type(dataType)
-                self.samples[key]['labels'] = \
-                       torch.tensor(self.samples[key]['labels']).type(labelType)
-        else: # If it is not torch
-            for key in self.samples.keys():
-                self.samples[key]['signals'] = \
-                                          dataType(self.samples[key]['signals'])
-                self.samples[key]['labels'] = \
-                                          labelType(self.samples[key]['labels'])
+        for key in self.samples.keys():
+            self.samples[key]['signals'] = changeDataType(
+                                                   self.samples[key]['signals'],
+                                                   dataType)
+            self.samples[key]['targets'] = changeDataType(
+                                                   self.samples[key]['targets'],
+                                                   targetType)
 
         # Update attribute
         if dataType is not self.dataType:
@@ -159,7 +262,7 @@ class _data:
         # methods should still be initialized within the data classes, if more
         # attributes are used.
         # This can only be done if they are torch tensors
-        if repr(self.dataType).find('torch') >= 0:
+        if 'torch' in repr(self.dataType):
             for key in self.samples.keys():
                 for secondKey in self.samples[key].keys():
                     self.samples[key][secondKey] \
@@ -172,7 +275,7 @@ class _data:
 class _dataForClassification(_data):
     # Internal supraclass from which data classes inherit when they are used
     # for classification. This renders the .evaluate() method the same in all
-    # cases (how many examples are correctly labels) so justifies the use of
+    # cases (how many examples are incorrectly labeled) so justifies the use of
     # another internal class.
     
     def __init__(self):
@@ -190,7 +293,7 @@ class _dataForClassification(_data):
             yHat = torch.argmax(yHat, dim = 1)
             #   And compute the error
             totalErrors = torch.sum(torch.abs(yHat - y) > tol)
-            accuracy = 1 - totalErrors.type(self.dataType)/N
+            errorRate = totalErrors.type(self.dataType)/N
         else:
             yHat = np.array(yHat)
             y = np.array(y)
@@ -198,9 +301,9 @@ class _dataForClassification(_data):
             yHat = np.argmax(yHat, axis = 1)
             #   And compute the error
             totalErrors = np.sum(np.abs(yHat - y) > tol)
-            accuracy = 1 - totalErrors.astype(self.dataType)/N
+            errorRate = totalErrors.astype(self.dataType)/N
         #   And from that, compute the accuracy
-        return accuracy
+        return errorRate
         
 class FacebookEgo:
     """
@@ -208,7 +311,9 @@ class FacebookEgo:
         in https://snap.stanford.edu/data/ego-Facebook.html by
         J. McAuley and J. Leskovec. Learning to Discover Social Circles in Ego
         Networks. NIPS, 2012.
+        
     Initialization:
+        
     Input:
         dataDir (string): path for the directory in where to look for the data 
             (if the data is not found, it will be downloaded to this directory)
@@ -366,6 +471,12 @@ class SourceLocalization(_dataForClassification):
             labels (dtype.array): numberSamples
             >> Obs.: The 0th dimension matches the corresponding signal to its
                 respective label
+                
+    .expandDims(): Adds the feature dimension to the graph signals (i.e. for
+        graph signals of shape nSamples x nNodes, turns them into shape
+        nSamples x 1 x nNodes, so that they can be handled by general graph
+        signal processing techniques that take into account a feature dimension
+        by default)
 
     .astype(type): change the type of the data matrix arrays.
         Input:
@@ -377,14 +488,16 @@ class SourceLocalization(_dataForClassification):
             device (string): target device to move the variables to (e.g. 'cpu',
                 'cuda:0', etc.)
 
-    accuracy = .evaluate(yHat, y, tol = 1e-9)
+    errorRate = .evaluate(yHat, y, tol = 1e-9)
         Input:
-            yHat (dtype.array): estimated labels (1-D binary vector)
-            y (dtype.array): correct labels (1-D binary vector)
-            >> Obs.: both arrays are of the same length
-            tol (float): numerical tolerance to consider two numbers to be equal
+            yHat (dtype.array): unnormalized probability of each label (shape:
+                nDataPoints x nClasses)
+            y (dtype.array): correct labels (1-D binary vector, shape:
+                nDataPoints)
+            tol (float, default = 1e-9): numerical tolerance to consider two
+                numbers to be equal
         Output:
-            accuracy (float): proportion of correct labels
+            errorRate (float): proportion of incorrect labels
 
     """
 
@@ -425,7 +538,7 @@ class SourceLocalization(_dataForClassification):
             Wt = np.concatenate((Wt, lastWt.reshape([1, G.N, G.N])), axis = 0)
         x = Wt[sampledTimes, :, sampledSources]
         # Now, we have the signals and the labels
-        signals = x # nTotal x N (CS notation)
+        signals = x # nTotal x N
         # Finally, we have to match the source nodes to the corresponding labels
         # which start at 0 and increase in integers.
         nodesToLabels = {}
@@ -434,11 +547,11 @@ class SourceLocalization(_dataForClassification):
         labels = [nodesToLabels[x] for x in sampledSources] # nTotal
         # Split and save them
         self.samples['train']['signals'] = signals[0:nTrain, :]
-        self.samples['train']['labels'] = np.array(labels[0:nTrain])
+        self.samples['train']['targets'] = np.array(labels[0:nTrain])
         self.samples['valid']['signals'] = signals[nTrain:nTrain+nValid, :]
-        self.samples['valid']['labels'] = np.array(labels[nTrain:nTrain+nValid])
+        self.samples['valid']['targets'] =np.array(labels[nTrain:nTrain+nValid])
         self.samples['test']['signals'] = signals[nTrain+nValid:nTotal, :]
-        self.samples['test']['labels'] = np.array(labels[nTrain+nValid:nTotal])
+        self.samples['test']['targets'] =np.array(labels[nTrain+nValid:nTotal])
         # Change data to specified type and device
         self.astype(self.dataType)
         self.to(self.device)
@@ -447,6 +560,21 @@ class Authorship(_dataForClassification):
     """
     Authorship: Loads the dataset of 19th century writers for the authorship
         attribution problem
+        
+    Credits for this dataset to Mark Eisen. Please, refer to this paper for
+    details, and whenever using this dataset:
+        S. Segarra, M. Eisen and A. Ribeiro, Authorship Attribution through
+        Function Word Adjacency Networks, IEEE Trans. Signal Process., vol. 63,
+        Issue 20, Oct 2015.
+        
+    Possible authors: 
+        jacob 'abbott',         robert louis 'stevenson',   louisa may 'alcott',
+        horatio 'alger',        james 'allen',              jane 'austen',
+        emily 'bronte',         james 'cooper',             charles 'dickens', 
+        hamlin 'garland',       nathaniel 'hawthorne',      henry 'james',
+        herman 'melville',      'page',                     henry 'thoreau',
+        mark 'twain',           arthur conan 'doyle',       washington 'irving',
+        edgar allan 'poe',      sarah orne 'jewett',        edith 'wharton'
 
     Initialization:
 
@@ -515,6 +643,12 @@ class Authorship(_dataForClassification):
             labels (dtype.array): numberSamples
             >> Obs.: The 0th dimension matches the corresponding signal to its
                 respective label
+                
+    .expandDims(): Adds the feature dimension to the graph signals (i.e. for
+        graph signals of shape nSamples x nNodes, turns them into shape
+        nSamples x 1 x nNodes, so that they can be handled by general graph
+        signal processing techniques that take into account a feature dimension
+        by default)
 
     .astype(type): change the type of the data matrix arrays.
         Input:
@@ -526,14 +660,14 @@ class Authorship(_dataForClassification):
             device (string): target device to move the variables to (e.g. 'cpu',
                 'cuda:0', etc.)
 
-    accuracy = .evaluate(yHat, y, tol = 1e-9)
+    errorRate = .evaluate(yHat, y, tol = 1e-9)
         Input:
             yHat (dtype.array): estimated labels (1-D binary vector)
             y (dtype.array): correct labels (1-D binary vector)
             >> Obs.: both arrays are of the same length
             tol (float): numerical tolerance to consider two numbers to be equal
         Output:
-            accuracy (float): proportion of correct labels
+            errorRate (float): proportion of incorrect labels
 
     """
     
@@ -651,11 +785,11 @@ class Authorship(_dataForClassification):
                                      np.zeros(nTestRest)), axis = 0)
         # And assign them to the required attribute samples
         self.samples['train']['signals'] = xTrain
-        self.samples['train']['labels'] = labelsTrain.astype(np.int)
+        self.samples['train']['targets'] = labelsTrain.astype(np.int)
         self.samples['valid']['signals'] = xValid
-        self.samples['valid']['labels'] = labelsValid.astype(np.int)
+        self.samples['valid']['targets'] = labelsValid.astype(np.int)
         self.samples['test']['signals'] = xTest
-        self.samples['test']['labels'] = labelsTest.astype(np.int)
+        self.samples['test']['targets'] = labelsTest.astype(np.int)
         # Create graph
         self.createGraph()
         # Change data to specified type and device
@@ -663,10 +797,7 @@ class Authorship(_dataForClassification):
         self.to(self.device)
         
     def loadData(self, dataPath):
-        # TODO: Analyze if it's worth it to create a .pkl and load that 
-        # directly once the data has been appropriately parsed. It's just
-        # that loading with hdf5storage takes a couple of second that
-        # could be saved if the .pkl file is faster.
+        # Load data (from a .mat file)
         rawData = hdf5storage.loadmat(dataPath)
         # rawData is a dictionary with four keys:
         #   'all_authors': contains the author list
@@ -792,15 +923,20 @@ class Authorship(_dataForClassification):
         # Store adjacency matrix
         self.adjacencyMatrix = W.astype(np.float64)
         # Update data
-        if self.samples['train']['signals'] is not None:
-            self.samples['train']['signals'] = \
-                                self.samples['train']['signals'][:, nodesToKeep]
-        if self.samples['valid']['signals'] is not None:
-            self.samples['valid']['signals'] = \
-                                self.samples['valid']['signals'][:, nodesToKeep]
-        if self.samples['test']['signals'] is not None:
-            self.samples['test']['signals'] = \
-                                self.samples['test']['signals'][:, nodesToKeep]
+        #   For each dataset split
+        for key in self.samples.keys():
+            #   Check the signals have been loaded
+            if self.samples[key]['signals'] is not None:
+                #   And check which is the dimension of the nodes (i.e. whether
+                #   it was expanded or not, since we always need to keep the
+                #   entries of the last dimension)
+                if len(self.samples[key]['signals'].shape) == 2:
+                    self.samples[key]['signals'] = \
+                                   self.samples[key]['signals'][: , nodesToKeep]
+                elif len(self.samples[key]['signals'].shape) == 2:
+                    self.samples[key]['signals'] = \
+                                   self.samples[key]['signals'][:,:,nodesToKeep]
+
         if self.allFunctionWords is not None:
             self.functionWords = [self.allFunctionWords[w] for w in nodesToKeep]
         
@@ -814,22 +950,13 @@ class Authorship(_dataForClassification):
     
     def astype(self, dataType):
         # This changes the type for the selected author as well as the samples
-        # First, the selected author info
-        if repr(dataType).find('torch') == -1:
-            for key in self.selectedAuthor.keys():
-                for secondKey in self.selectedAuthor[key].keys():
-                    self.selectedAuthor[key][secondKey] \
-                                 = dataType(self.selectedAuthor[key][secondKey])
-            self.adjacencyMatrix = dataType(self.adjacencyMatrix)
-        else:
-            for key in self.selectedAuthor.keys():
-                for secondKey in self.selectedAuthor[key].keys():
-                    self.selectedAuthor[key][secondKey] \
-                            = torch.tensor(self.selectedAuthor[key][secondKey])\
-                                    .type(dataType)
-            self.adjacencyMatrix = torch.tensor(self.adjacencyMatrix)\
-                                        .type(dataType)
-
+        for key in self.selectedAuthor.keys():
+            for secondKey in self.selectedAuthor[key].keys():
+                self.selectedAuthor[key][secondKey] = changeDataType(
+                                            self.selectedAuthor[key][secondKey],
+                                            dataType)
+        self.adjacencyMatrix = changeDataType(self.adjacencyMatrix, dataType)
+        
         # And now, initialize to change the samples as well (and also save the 
         # data type)
         super().astype(dataType)
@@ -837,7 +964,7 @@ class Authorship(_dataForClassification):
     
     def to(self, device):
         # If the dataType is 'torch'
-        if repr(self.dataType).find('torch') >= 0:
+        if 'torch' in repr(self.dataType):
             # Change the selected author ('test', 'train', 'valid', 'all';
             # 'WANs', 'wordFreq')
             for key in self.selectedAuthor.keys():
@@ -852,25 +979,16 @@ class Authorship(_dataForClassification):
 class MovieLens(_data):
     """
     MovieLens: Loads and handles handles the MovieLens-100k dataset
-        The setting is that of regression on a single node of the graph. That
+
+        The setting is that of regression on a specific node of the graph. That
         is, given a graph, and an incomplete graph signal on that graph, we want
-        to estimate the value of the signal on a single node.
+        to estimate the value of the signal on a specific node.
         
         If, for instance, we have a movie-based graph, then the graph signal
         corresponds to the ratings that a given user gave to some of the movies.
         The objective is to estimate how that particular user would rate one
         of the other available movies. (Same holds by interchanging 'movie' with
         'user' in this paragraph)
-        
-        This differs from the classical setting. One typical way of addressing
-        this problem is as matrix completion: estimate the value that _all_
-        user would give to _all_ movies. Another typical setting is to estimate
-        the value that a single user would give to _all_ movies (or how a single
-        movie would be rated by _all_ users).
-        
-        Obs.: The loadData() method that builds the incomplete matrix with
-        the data base would still work if this is to be used for one of the more
-        standard problems.
 
     Initialization:
 
@@ -878,12 +996,13 @@ class MovieLens(_data):
         graphType('user' or 'movie'): which underlying graph to build; 'user'
             for user-based graph (each node is a user), and 'movie' for 
             movie-based (each node is a movie); this also determines the data,
-            on a user-based graph, each data sample corresponds to a movie, and
-            on the movie-based graph, each data sample corresponds to a user.
-        labelID (int): this specific node is selected to be interpolated; 
-            this has effect in the building of the training, validation and 
-            test sets, since only data samples that have a value
-            at that node can be used
+            on a user-based graph, each data sample (each graph signal) 
+            corresponds to a movie, and on the movie-based graph, each data
+            sample corresponds to a user.
+        labelID (list of int or 'all'): these are the specific nodes on which
+            we will be looking to interpolate; this has effect in the building
+            of the training, validation and test sets, since only data samples
+            that have a value at that node can be used
         ratioTrain (float): ratio of the total samples to be part of the
             validation set
         ratioValid (float): ratio of the train samples to be part of the
@@ -895,18 +1014,27 @@ class MovieLens(_data):
         forceConnected (bool): If True, ensure that the resulting graph is
             connected
         kNN (int): sparsify this graph keeping kNN nearest neighbors
-        categorical (bool): if the data is going to be estimated as a
-            categorical variable (default: True; since there are only a finite
-            number of integer ratings, we can solve this regression problem
-            as a classification problem in which we want to guess what is the
-            'category' the estimated rating falls in, if this is the case, then
-            the evaluate() method needs to convert the one-hot vector into
-            an actual rating, before computing the RMSE --i.e., even though the
-            problem can be solved by a classification problem, the evaluation
-            function is still the RMSE which is the standard use)
+        minRatings (int, default: 0): get rid of all columns and rows with
+            less than minRatings ratings (for minRatings = 0, just keep all
+            the matrix)
+        interpolate (bool, default: False): if True, interpolates the matrix by
+            means of a nearest-neighbor rule before creating the graph signals
+            (i.e. all the graph signals will have complete ratings)
+            >> Obs.: Just using these signals to interpolate the remaining 
+                rating can be interpreted as a typical baseline.
         dataType (dtype): type of loaded data (default: np.float64)
         device (device): where to store the data (e.g., 'cpu', 'cuda:0', etc.)
-
+        
+    The resulting dataset consists of triads (signal, target, labelID) where:
+        - the signal contains the ratings given by some data sample to all nodes
+          with a 0 for the rating corresponding to the labelID node (note that,
+          if interpolate = False, then there will also be zeros in other nodes
+          that have not been rated)
+        - target is the value of the rating at the corresponding labelID node
+        - labelID is the label of the node whose rating has been removed
+        In other words, we want to use signal to estimate the value target at
+        the node labelID.
+    
     Methods:
         
     .loadData(filename, [dataDir]): loads the data from dataDir (if not
@@ -916,9 +1044,15 @@ class MovieLens(_data):
         
     .createGraph(): creates a graphType-based graph with the previously
         established options (undirected, isolated, connected, etc.); this graph 
-        is always sparsified by means of a nearest-neighbor algorithm.
+        is always sparsified by means of a nearest-neighbor rule. The graph
+        is created containing only data samples in the training set.
+        
+    .interpolateRatings(): uses a nearest-neighbor rule to interpolate the
+        ratings in the graph signal; this means that all zero values that do not
+        correspond to labelID are replaced by the average of ratings of the 
+        closest neighbors with nonzero ratings.
     
-    .getGraph(): fetches the adjacency matrix of the stored graph
+    .getGraph(): fetches the adjacency matrix of the stored graph.
     
     .getIncompleteMatrix(): fetches the incomplete matrix as it was loaded
         from the data.
@@ -935,10 +1069,15 @@ class MovieLens(_data):
         to build a graph with the desired characteristics
         
     .evaluate(yHat, y): computes the RMSE between the estimated ratings yHat 
-        and the actual ratings given in y; if categorical = True, then yHat
-        is expected to be a vector of size the number of possible ratings, and
-        the value of the rating is taken to be the position where the maximum
-        value of that vector is.
+        and the actual ratings given in y.
+        
+    lossValue = .evaluate(yHat, y)
+        Input:
+            yHat (dtype.array): estimated target
+            y (dtype.array): target representation
+
+        Output:
+            lossValue (float): regression loss chosen
 
     .astype(type): change the type of the data matrix arrays.
         Input:
@@ -950,24 +1089,19 @@ class MovieLens(_data):
             device (string): target device to move the variables to (e.g. 'cpu',
                 'cuda:0', etc.)
 
-    lossValue = .evaluate(yHat, y)
-        Input:
-            yHat (dtype.array): estimated target
-            y (dtype.array): target representation
-
-        Output:
-            lossValue (float): regression loss chosen
-
     """
     
     def __init__(self, graphType, labelID, ratioTrain, ratioValid, dataDir,
                  keepIsolatedNodes, forceUndirected, forceConnected, kNN,
-                 categorical = True, dataType = np.float64, device = 'cpu'):
+                 maxDataPoints = None,
+                 minRatings = 0,
+                 interpolate = False,
+                 dataType = np.float64, device = 'cpu'):
         
         super().__init__()
         # This creates the attributes: dataType, device, nTrain, nTest, nValid,
         # and samples, and fills them all with None, and also creates the 
-        # methods: getSamples, astype, to, and evaluate.
+        # methods: getSamples, astype, and to.
         self.dataType = dataType
         self.device = device
         
@@ -978,16 +1112,10 @@ class MovieLens(_data):
         # want to use.
         self.graphType = graphType
         #   Label ID
-        assert labelID > 0
-        self.labelID = labelID - 1 # -1 is to match the movieLens indexing 
-        #   (which) starts at 1, with the row/column indexing, which starts at
-        #   zero and is the one we will actually use (is to avoid subtracting 
-        #   -1 everywhere else)
+        assert type(labelID) is list or labelID == 'all'
         # Label ID is the user ID or the movie ID following the MovieLens 
         # nomenclature. This determines how we build the labels in the
-        # dataset. If it's all, then we are in the regression problem, and
-        # the "label" is just the entire signal. [Not sure this would fit in the
-        # framework].
+        # dataset. If it's all, then we want to estimate for all users/movies.
         #   Dataset partition
         self.ratioTrain = ratioTrain
         self.ratioValid = ratioValid
@@ -999,8 +1127,11 @@ class MovieLens(_data):
         self.forceUndirected = forceUndirected
         self.forceConnected = forceConnected
         self.kNN = kNN
-        #   Evaluation processing
-        self.categorical = categorical
+        #   Discard samples with less than minRatings ratings
+        self.minRatings = minRatings
+        #   Interpolate nonexisting ratings (i.e. get rid of zeros and replace 
+        #   them by the nearest neighbor rating)
+        self.doInterpolate = interpolate
         #   Empty attributes for now
         self.incompleteMatrix = None
         self.movieTitles = {}
@@ -1012,6 +1143,48 @@ class MovieLens(_data):
         self.loadData('movielens100kIncompleteMatrix.pkl')
         # This has loaded the incompleteMatrix and movieTitles attributes.
         
+        # First check if we might need to get rid of columns and rows to get 
+        # the minimum number of ratings requested
+        if self.minRatings > 0:
+            incompleteMatrix = self.incompleteMatrix
+            # Get a one where there are ratings, and a 0 where there are not
+            binaryIncompleteMatrix = (incompleteMatrix>0)\
+                                                 .astype(incompleteMatrix.dtype)
+            # Count the number of ratings in each row
+            nRatingsPerRow = np.sum(binaryIncompleteMatrix, axis = 1)
+            # Count the number of ratings in each column
+            nRatingsPerCol = np.sum(binaryIncompleteMatrix, axis = 0)
+            # Indices of rows and columns to keep
+            indexRowsToKeep = np.nonzero(nRatingsPerRow > self.minRatings)[0]
+            indexColsToKeep = np.nonzero(nRatingsPerCol > self.minRatings)[0]
+            # Reduce the size of the matrix
+            incompleteMatrix = \
+                           incompleteMatrix[indexRowsToKeep][:, indexColsToKeep]
+            # Store it
+            self.incompleteMatrix = incompleteMatrix
+            
+            # Also, we need to consider that, if we have the movie graph, 
+            # then we need to update the movie list as well (all the columns
+            # we lost -the nodes we lost- are part of a movie list that
+            # has a one-to-one correspondence)
+            if self.graphType == 'movie':
+                if len(self.movieTitles) > 0: # Non empty movieList
+                    # Where to save the new movie list
+                    movieTitles = {}
+                    # Because nodes are now numbered sequentially, we need to
+                    # do the same with the movieID to keep them matched (i.e.
+                    # node n corresponds to movieList[n] title)
+                    newMovieID = 0
+                    for movieID in indexColsToKeep:
+                        movieTitles[newMovieID] = self.movieTitles[movieID]
+                        newMovieID = newMovieID + 1
+                    # Update movieList
+                    self.movieTitles = movieTitles
+        else:
+            # If there was no need to reduce the columns or rows
+            indexRowsToKeep = np.arange(self.incompleteMatrix.shape[0])
+            indexColsToKeep = np.arange(self.incompleteMatrix.shape[1])
+        
         # To simplify code, we will work always with each row being a data
         # sample. The incompleteMatrix is User x Movies
         if graphType == 'user':
@@ -1020,6 +1193,9 @@ class MovieLens(_data):
             # incompleteMatrix is a graph signal, but since we're working with
             # rows, we have to transpose it
             workingMatrix = self.incompleteMatrix.T # Movies x User
+            # Which one correspond to the nodes
+            indexNodesToKeep = indexRowsToKeep
+            
             # Now, each row is a movie score for all users, so that it is a
             # graph signal in the user-based graph.
         else:
@@ -1027,47 +1203,252 @@ class MovieLens(_data):
             # In this case, each row is a user (how that user scored all movies)
             # and this is the kind of data samples we need for movie-based
             # graphs
-            
-        # Now, let's determine the labelID so we can then do the split.
-        # Basically, if labelID not 'all', then the number of datasamples
-        # will depend on how many are available for that ID. If it's all, then
-        # they just all go there.
+            indexNodesToKeep = indexColsToKeep
         
-        # If we want to select a specific column, we first, need to check
-        # that the labelID is one of the columns (since the columns index 
-        # the nodes, and we want to know the estimate the value of the 
-        # signal at a single node, we need to be sure that this node is
-        # there)
-        assert self.labelID < workingMatrix.shape[1]
-        # Extract that column (recall that movieLens IDs start at 1)
-        selectedID = workingMatrix[:, self.labelID]
-        # Now we have to check the number of nonzero elements in the column
-        indexDataPoints = np.nonzero(selectedID)[0]
-        # This is because np.nonzero() returns a tuple for the index of the
-        # nonzero elements in each dimension, but here, when we select a
-        # column, we have only one dimension.
-        nDataPoints = len(indexDataPoints) # Total number of points
-        # Now we split all the valid points into train/validation/test
-        self.nTrain = round(ratioTrain * nDataPoints) # Total train set
-        self.nValid = round(ratioValid * self.nTrain) # Validation set
-        self.nTrain = self.nTrain - self.nValid # Effective train set
-        self.nTest = nDataPoints - self.nTrain - self.nValid
+        nNodes = workingMatrix.shape[1]
+        assert len(indexNodesToKeep) == nNodes
+        
+        # And we need to map the original IDs to the new ones (note that
+        # each column is a node now -each row is a graph signal- so we
+        # care about matching the labels to the corresponding new ones)
+        #   First check, that, unless we wanted all indices (so we don't
+        #   care much about the ones we just dropped), we have them in the
+        #   new indices (i.e. we didn't drop them)        
+        if labelID != 'all':
+            # For each of the introduced IDs, check:
+            self.labelID = np.empty(0, dtype = np.int)
+            for i in labelID:
+                # Recall that labelID they start with 1, but indexNodesToKeep
+                # starts with zero
+                assert (i-1) in indexNodesToKeep
+                newIndex = np.argwhere(indexNodesToKeep == (i-1))[0]
+                self.labelID = np.concatenate((self.labelID, newIndex))
+        else:
+            self.labelID = np.arange(nNodes)
+        
+        # Up to this point, we just have an array of IDs of nodes we care about
+        # This could be all, one or a few, but is a numpy.array
+        
+        # So, now we just select a number of rows (graph signals) at random
+        # to make the train and valid and test set. But we need to keep
+        # track of the ID (the node)
+        # The total number of points is now the number of nonzero elements
+        # of the matrix. The problem is that we cannot get a random number
+        # of nonzero elements of the matrix, because we're risking selecting
+        # all rows (graph signals), and thus not leaving anything for the
+        # train and test set. In other words, the rows determine the graph
+        # signals, and all the nonzero elements of each row will make up
+        # for the points in each training set.
+            
+        # Next we reduce the size of the matrix to the ones that we are
+        # interested in
+        selectedMatrix = workingMatrix[:, self.labelID]
+        
+        # So far we've got the value of all graph signals only on the nodes
+        # of interest (some of these might just be zero, if the nodes of
+        # interest weren't rated by that given graph signal)
+        
+        # Get rid of those rows that have no ratings for the labels of
+        # interest
+        #   We sum all the rows: since all the ratings are positive, those
+        #   rows that are zero is because they have no ratings
+        nonzeroRows = np.sum(selectedMatrix, axis = 1)
+        nonzeroRows = np.nonzero(nonzeroRows)[0]
+        selectedMatrix = selectedMatrix[nonzeroRows,:]
+        
+        # Now, we move on to count the total number of graph signals that
+        # we have (number of rows)
+        nRows = selectedMatrix.shape[0]
         # Permute the indices at random
-        randPerm = np.random.permutation(nDataPoints)
-        # And choose the indices that will correspond to each dataset
-        indexTrainPoints = indexDataPoints[randPerm[0:self.nTrain]]
-        indexValidPoints = indexDataPoints[\
-                            randPerm[self.nTrain : self.nTrain+self.nValid]]
-        indexTestPoints = indexDataPoints[\
-                            randPerm[self.nTrain+self.nValid : nDataPoints]]
-        # Finally get the corresponding samples and store them
-        self.samples['train']['signals'] = workingMatrix[indexTrainPoints,:]
-        self.samples['train']['labels'] = selectedID[indexTrainPoints]
-        self.samples['valid']['signals'] = workingMatrix[indexValidPoints,:]
-        self.samples['valid']['labels'] = selectedID[indexValidPoints]
-        self.samples['test']['signals'] = workingMatrix[indexTestPoints,:]
-        self.samples['test']['labels'] = selectedID[indexTestPoints]
-        # And update the index of the data points.
+        randPerm = np.random.permutation(nRows)
+        # This gives me a random way of going through all the rows. So we
+        # will do that, going row by row, picking all the nonzero elements
+        # in said row, until we reach the (closest possible) number to the
+        # amount of training samples we want.
+        # The point of this is that each row might have more than one
+        # data point: i.e. some graph signal might have rated more than one
+        # of the nodes of interest; therefore this would amount to having
+        # more than one data point stemming from that graph signal -by 
+        # zero-ing out each of the nodes separately-
+        #   Total number of available samples (whether to take the 0 or the 
+        #   1 element of the set is indistinct, they both have the same len)
+        nDataPoints = len(np.nonzero(selectedMatrix)[0])
+        #   Check if the total number of desired samples has been defined
+        #   (a max number of data points could have been set if we want
+        #   to randomly select a subset of all available datapoints, for
+        #   running a faster training)
+        if maxDataPoints is None:
+            maxDataPoints = nDataPoints
+        #   and if it was designed, if it is not greater than the total 
+        #   number of data points available
+        elif maxDataPoints > nDataPoints:
+            maxDataPoints = nDataPoints
+        # Target number of train, valid and test samples
+        nTrain = round(ratioTrain * maxDataPoints)
+        nValid = round(ratioValid * nTrain)
+        nTrain = nTrain - nValid
+        nTest = maxDataPoints - nTrain - nValid
+        
+        # TODO: There has to be a way of accelerating this thing below
+        
+        # Training count
+        nTrainSoFar = 0
+        rowCounter = 0
+        # Save variables
+        trainSignals = np.empty([0, nNodes])
+        trainLabels = np.empty(0)
+        trainIDs = np.empty(0).astype(np.int)
+        while nTrainSoFar < nTrain and rowCounter < nRows:
+            # Get the corresponding selected row
+            thisRow = selectedMatrix[randPerm[rowCounter], :]
+            # Get the indices of the nonzero elements of interest (i.e
+            # of all the nodes of interest, which ones have a nonzero
+            # rating on this graph signal)
+            thisNZcols = np.nonzero(thisRow)[0] # Nonzero Cols
+            # And now we can match this to the corresponding columns in the
+            # original matrix
+            thisIDs = self.labelID[thisNZcols]
+            thisNpoints = len(thisIDs)
+            # Get the labels
+            thisLabels = thisRow[thisNZcols]
+            # Get the signals
+            thisSignals = workingMatrix[nonzeroRows[randPerm[rowCounter]],:]
+            # From this signal (taken from the original working matrix) we 
+            # will obtain as many signals as nonzero ratings of the nodes of
+            # interest. Therefore, we need to repeat it to that point
+            thisSignals = np.tile(thisSignals, [thisNpoints, 1])
+            #   thisNpoints x nNodes
+            #   We need to zero-out those elements that will be part of
+            #   the samples
+            thisSignals[np.arange(thisNpoints), thisIDs] = 0
+            # And now we should be able to concatenate
+            trainSignals = np.concatenate((trainSignals, thisSignals),
+                                          axis = 0)
+            trainLabels = np.concatenate((trainLabels, thisLabels))
+            trainIDs = np.concatenate((trainIDs, thisIDs))
+            # Add how many new data points we have just got
+            nTrainSoFar += thisNpoints
+            # And increase the counter
+            rowCounter += 1
+        # We have finalized the training set. Now, we have to count how
+        # many training samples we actually have
+        self.nTrain = len(trainLabels)
+        # We also want to know which rows we have selected so far
+        indexTrainPoints = nonzeroRows[randPerm[0:rowCounter]]
+        nRowsTrain = rowCounter
+        
+        # Now, repeat for validation set:
+        nValidSoFar = 0
+        rowCounter = nRowsTrain # Initialize where the other one left off
+        # Save variables
+        validSignals = np.empty([0, nNodes])
+        validLabels = np.empty(0)
+        validIDs = np.empty(0).astype(np.int)
+        while nValidSoFar < nValid and rowCounter < nRows:
+            # Get the corresponding selected row
+            thisRow = selectedMatrix[randPerm[rowCounter], :]
+            # Get the indices of the nonzero elements of interest (i.e
+            # of all the nodes of interest, which ones have a nonzero
+            # rating on this graph signal)
+            thisNZcols = np.nonzero(thisRow)[0] # Nonzero Cols
+            # And now we can match this to the corresponding columns in the
+            # original matrix
+            thisIDs = self.labelID[thisNZcols]
+            thisNpoints = len(thisIDs)
+            # Get the labels
+            thisLabels = thisRow[thisNZcols]
+            # Get the signals
+            thisSignals = workingMatrix[nonzeroRows[randPerm[rowCounter]],:]
+            # From this signal (taken from the original working matrix) we 
+            # will obtain as many signals as nonzero ratings of the nodes of
+            # interest. Therefore, we need to repeat it to that point
+            thisSignals = np.tile(thisSignals, [thisNpoints, 1])
+            #   thisNpoints x nNodes
+            #   We need to zero-out those elements that will be part of
+            #   the samples
+            thisSignals[np.arange(thisNpoints), thisIDs] = 0
+            # And now we should be able to concatenate
+            validSignals = np.concatenate((validSignals, thisSignals),
+                                          axis = 0)
+            validLabels = np.concatenate((validLabels, thisLabels))
+            validIDs = np.concatenate((validIDs, thisIDs))
+            # Add how many new data points we have just got
+            nValidSoFar += thisNpoints
+            # And increase the counter
+            rowCounter += 1
+        # We have finalized the validation set. Now, we have to count how
+        # many validation samples we actually have
+        self.nValid = len(validLabels)
+        # We also want to know which rows we have selected so far
+        indexValidPoints = nonzeroRows[randPerm[nRowsTrain:rowCounter]]
+        nRowsValid = rowCounter - nRowsTrain
+        
+        # And, finally the test set
+        nTestSoFar = 0
+        rowCounter = nRowsTrain + nRowsValid
+        # Save variables
+        testSignals = np.empty([0, nNodes])
+        testLabels = np.empty(0)
+        testIDs = np.empty(0).astype(np.int)
+        while nTestSoFar < nTest and rowCounter < nRows:
+            # Get the corresponding selected row
+            thisRow = selectedMatrix[randPerm[rowCounter], :]
+            # Get the indices of the nonzero elements of interest (i.e
+            # of all the nodes of interest, which ones have a nonzero
+            # rating on this graph signal)
+            thisNZcols = np.nonzero(thisRow)[0] # Nonzero Cols
+            # And now we can match this to the corresponding columns in the
+            # original matrix
+            thisIDs = self.labelID[thisNZcols]
+            thisNpoints = len(thisIDs)
+            # Get the labels
+            thisLabels = thisRow[thisNZcols]
+            # Get the signals
+            thisSignals = workingMatrix[nonzeroRows[randPerm[rowCounter]],:]
+            # From this signal (taken from the original working matrix) we 
+            # will obtain as many signals as nonzero ratings of the nodes of
+            # interest. Therefore, we need to repeat it to that point
+            thisSignals = np.tile(thisSignals, [thisNpoints, 1])
+            #   thisNpoints x nNodes
+            #   We need to zero-out those elements that will be part of
+            #   the samples
+            thisSignals[np.arange(thisNpoints), thisIDs] = 0
+            # And now we should be able to concatenate
+            testSignals = np.concatenate((testSignals, thisSignals),
+                                         axis = 0)
+            testLabels = np.concatenate((testLabels, thisLabels))
+            testIDs = np.concatenate((testIDs, thisIDs))
+            # Add how many new data points we have just got
+            nTestSoFar += thisNpoints
+            # And increase the counter
+            rowCounter += 1
+        # We have finalized the validation set. Now, we have to count how
+        # many validation samples we actually have
+        self.nTest = len(testLabels)
+        # We also want to know which rows we have selected so far
+        indexTestPoints=nonzeroRows[randPerm[nRowsTrain+nRowsValid:rowCounter]]
+        
+        # And we also need all the data points (all the rows), so:
+        indexDataPoints = np.concatenate((indexTrainPoints,
+                                          indexValidPoints,
+                                          indexTestPoints))
+        
+        # Now, this finalizes the data split, now, so we have all we need:
+        # signals, labels, and IDs.
+                
+        # So far, either by selecting a node, or by selecting all nodes, we
+        # have the variables we need: signals, labels, IDs and index points.
+        self.samples['train']['signals'] = trainSignals
+        self.samples['train']['targets'] = trainLabels
+        self.samples['valid']['signals'] = validSignals
+        self.samples['valid']['targets'] = validLabels
+        self.samples['test']['signals'] = testSignals
+        self.samples['test']['targets'] = testLabels
+        self.targetIDs = {}
+        self.targetIDs['train'] = trainIDs
+        self.targetIDs['valid'] = validIDs
+        self.targetIDs['test'] = testIDs
+        # And update the index of the data points (which are the rows selected)
         self.indexDataPoints['all'] = indexDataPoints
         self.indexDataPoints['train'] = indexTrainPoints
         self.indexDataPoints['valid'] = indexValidPoints
@@ -1076,24 +1457,12 @@ class MovieLens(_data):
         # Now the data has been loaded, and the training/test partition has been
         # made, create the graph
         self.createGraph()
+        # Observe that this graph also adjusts the signals to reflect any change
+        # in the number of nodes
         
-        # Now that all the empty elements with zeros have been dealt with (and
-        # the self.incompleteMatrix still has zeros), if we are having
-        # categorical variables, then we need to force this to be labels
-        # starting at 0 (and ints)
-        if self.categorical:
-            if '64' in str(self.samples['train']['signals'].dtype):
-                labelDataType = np.int64 # At this point, everything is still in
-                    # numpy
-            elif '32' in str(self.samples['train']['signals'].dtype):
-                labelDataType = np.int32 # At this point, everything is still in
-                    # numpy
-            self.samples['train']['labels'] = \
-                              labelDataType(self.samples['train']['labels'] - 1)
-            self.samples['valid']['labels'] = \
-                              labelDataType(self.samples['valid']['labels'] - 1)
-            self.samples['test']['labels'] = \
-                               labelDataType(self.samples['test']['labels'] - 1)
+        # Finally, check if we want to interpolate the useless zeros
+        if self.doInterpolate:
+            self.interpolateRatings()
         
         # Change data to specified type and device
         self.astype(self.dataType)
@@ -1211,7 +1580,15 @@ class MovieLens(_data):
         
         # Recall that the datapoints that I have already split following the
         # user/movie ID selection (or 'all' for all it matters) have to be
-        # taken into account.
+        # taken into account. So, check that this points have been determined
+        assert 'all' in self.indexDataPoints.keys()
+        assert 'train' in self.indexDataPoints.keys()
+        assert 'valid' in self.indexDataPoints.keys()
+        assert 'test' in self.indexDataPoints.keys()
+        assert self.nTrain is not None \
+                and self.nValid is not None \
+                and self.nTest is not None            
+        
         # To follow the paper by Huang et al., where the data is given by
         # Y in U x M, and goes into full detail on how to build the U x U
         # user-based graph, then, we will stick with this formulation
@@ -1220,27 +1597,42 @@ class MovieLens(_data):
         else:
             workingMatrix = self.incompleteMatrix.T # Movies x User
         # Note that this is the opposite arrangement that we considered before
-        # when loading the data into samples; back then we considered samples
+        # when loading the data into samples; back then, we considered samples
         # to be rows and the data to build the graph was therefore in columns;
         # in this case, it is the opposite, since we still want to use the data
         # located in the rows.
         
-        # Now, no matter what we choose, every row corresponds to a node in the
-        # graph.
+        # Now, the indices in self.indexDataPoints, essentially determine the
+        # data samples (the graph signals) that we put in each set. Now, these
+        # graph signals are now the columns, because the nodes are the rows.
+        # So, these indexDataPoints are the columns in the new workingMatrix.
         
-        # Now we need to partition the dataset into a train set, but be sure
-        # that we included the samples that were used for the training set in
-        # the self.samples.
+        # In essence, we need to add more points to complete the train set, but
+        # to be sure that (i) these points are not the ones in the valid and
+        # test sets, and (ii) that the training points are included already.
         
-        # So most of what comes down here is how to select the samples that
-        # we already selected as train set, and complement that with other 
-        # data samples. The problem is that the rest of the samples we
-        # are picking them at random from the entire incomplete matrix, where
-        # the ones we already have are for one specific row (column in the
-        # loading data).
+        # Now, out of all possible graph signals (number of columns in this
+        # workingMatrix), we have selected some of those to be part of the
+        # training set. But each  of these graph signals, have a different
+        # number of traning points (because they have a different number of
+        # nonzero elements). And we only care, when building the graph, on the
+        # nonzero elements of the graph signals.
         
-        # The number of data points is given by the number of nonzero elements 
-        # of the matrix
+        # So, let's count the number of training points that we actually have
+        # To do this, we count the number of nonzero elements in the samples
+        # that we have selected
+        trainSamples = self.indexDataPoints['train']
+        nTrainPointsActual = len(np.nonzero(workingMatrix[:, trainSamples])[0])
+        # And the total number of points that we have already partitioned into 
+        # the different sets
+        validSamples = self.indexDataPoints['valid']
+        nValidPointsActual = len(np.nonzero(workingMatrix[:, validSamples])[0])
+        testSamples = self.indexDataPoints['test']
+        nTestPointsActual = len(np.nonzero(workingMatrix[:, testSamples])[0])
+        # Total number of points already considered
+        nPointsActual = nTrainPointsActual+nValidPointsActual+nTestPointsActual
+        
+        # The total number of data points in the entire dataset is
         indexDataPoints = np.nonzero(workingMatrix)
         # This is a tuple, where the first element is the place of nonzero
         # indices in the rows, and the second element is the place of nonzero
@@ -1250,66 +1642,111 @@ class MovieLens(_data):
         # assigned to either one or the other dataset, so when we split
         # these datasets, we cannot consider these.
         
-        # Let's start with computing how many training points we still need
-        nTrainPointsAll = round(self.ratioTrain * nDataPoints)
-        nTrainPointsRest = nTrainPointsAll - self.nTrain - self.nValid
-        # This is the number of points we still need.
+        # The total number of expected training points is
+        nTrainPointsAll = int(round(self.ratioTrain * nDataPoints))
+        #   Discard the (expected) number of validation points
+        nTrainPointsAll = int(nTrainPointsAll\
+                                        -round(self.ratioValid*nTrainPointsAll))
         
-        # Now, indexDataPoints have all nTrainPointsAll non zero elements,
-        # we need to discard those that have labelID in the rows
-        subIndexDataPointsRestAll = np.nonzero(indexDataPoints[0] \
-                                                             != self.labelID)[0]
-        #   Nonzero points along the rows
-        indexDataPointsRestAll = (indexDataPoints[0][subIndexDataPointsRestAll],
-                                  indexDataPoints[1][subIndexDataPointsRestAll])
-        #   Update the indices (rows and columns) of all the data points to
-        #   exclude those with labelID in the rows
-        nDataPointsRest = nDataPoints - self.nTrain - self.nTest - self.nValid
-        #   Number of data points left
-        assert len(indexDataPointsRestAll[0]) == nDataPointsRest
-        #   To check that we picked the right number of elements
+        # Now, we only need to add more points if the expected number of 
+        # training points is greater than the ones we still have.
         
-        # Now, get the random permutation of these elements
-        randPerm = np.random.permutation(nDataPointsRest)
-        # Pick the number needed for training
-        subIndexRandomRest = randPerm[0:nTrainPointsRest]
-        # And select the necessary ones at random
-        indexTrainPointsRest = (indexDataPointsRestAll[0][subIndexRandomRest],
-                                indexDataPointsRestAll[1][subIndexRandomRest])
-        # So far, we made it to select the appropriate number of training 
-        # samples, at random, that do not include the ones we already selected
-        # according to labelID.
+        # If we have more training points than what we originally intended, we
+        # just use those (they will be part of the training samples regardless)
+        # This could happen, for instance, if by chances, the graph signals
+        # picked for training set are the more dense ones, giving a lot of
+        # training points: nTrainPointsAll > nTrainPointsActual
         
-        # Now, we need to join this selected training points from the rest of 
-        # the dataset, with the points from the labelID training set
-        #   Get the points from the labelID (both training and valid)
-        allTrainPointsID = np.concatenate((self.indexDataPoints['train'],
-                                           self.indexDataPoints['valid']))
-        #   We need to add the label ID in the rows, to fit them in the
-        #   context of the matrix
-        labelIDpadding = self.labelID * np.ones(self.nTrain + self.nValid)
-        allTrainPointsID = (labelIDpadding.astype(allTrainPointsID.dtype),
-                            allTrainPointsID)
-        #   And join them to the actual points
-        indexTrainPoints = (
-                   np.concatenate((indexTrainPointsRest[0],allTrainPointsID[0])),
-                   np.concatenate((indexTrainPointsRest[1],allTrainPointsID[1]))
-                            )
+        # Likewise, if we do not have any more points to take from (because all
+        # the other graph signals have already been taken for validation and
+        # test set), we can proceed to get the remaining needed points:
+        # nPointsActual < nDataPoints
+        
+        if nTrainPointsAll > nTrainPointsActual and nPointsActual < nDataPoints:
+            # So, now, the number of points that we still need to get are
+            nTrainPointsRest = nTrainPointsAll - nTrainPointsActual
+            # Next, we need to determine what is the pool of indices where we
+            # can get the samples from (it cannot be samples that have already
+            # been considered in any of the graph signals)
+            nTotalCols = workingMatrix.shape[1] # Total number of columns
+            # Note that self.indexDataPoints['all'] has all the columns that 
+            # have already been selected. So the remaining columns are the ones
+            # that are not there
+            indexRemainingCols = [i for i in range(nTotalCols) \
+                                        if i not in self.indexDataPoints['all']]
+            indexRemainingCols = np.array(indexRemainingCols)
+            # So the total number of points left is
+            indexDataPointsRest=np.nonzero(workingMatrix[:,indexRemainingCols])
+            nDataPointsRest = len(indexDataPointsRest[0])
+            # Now, check that we have enough points to complete the total 
+            # desired. If not, just use all of them
+            if nDataPointsRest < nTrainPointsRest:
+                nTrainPointsRest = nDataPointsRest
+            
+            # Now, we need to select at random from these points, those that 
+            # will be part of the training set to build the graph.
+            randPerm = np.random.permutation(nDataPointsRest)
+            # Pick the needed number of subindices
+            subIndexRandomRest = randPerm[0:nTrainPointsRest]
+            # And select the points (both rows and columns)
+            #   Remember that columns indexed by indexDataPointsRest, actually
+            #   refer to the submatrix of remaining columns, so
+            indexDataPointsRestCols=indexDataPointsRest[1][subIndexRandomRest]
+            indexDataPointsRestCols=indexRemainingCols[indexDataPointsRestCols]
+            indexDataPointsRestRows=indexDataPointsRest[0][subIndexRandomRest]
+            indexTrainPointsRest = (indexDataPointsRestRows,
+                                    indexDataPointsRestCols)
+            # So, so far, we have all the needed training points: (i) those in
+            # the original training set, and (ii) those in the remaining graph
+            # signals to complete the number of desired training points.
+            
+            # Now, we need to merge these points with the ones already in the
+            # training set of graph signals
+            indexTrainPointsID = np.nonzero(
+                                workingMatrix[:, self.indexDataPoints['train']])
+            # And put them together with the ones we already had
+            indexTrainPoints = (
+                np.concatenate((indexTrainPointsRest[0],indexTrainPointsID[0])),
+                np.concatenate((indexTrainPointsRest[1],
+                           self.indexDataPoints['train'][indexTrainPointsID[1]]))
+                                )
+        else:
+            # If we already had all the points we wanted, which are those that
+            # were already in the training set, we need to get them, so it's
+            # just a renaming
+            indexTrainPoints = np.nonzero(
+                                workingMatrix[:, self.indexDataPoints['train']])
+            # But the columns in this indexTrainPoints, are actually the
+            # columns of the smaller matrix evaluated only on 
+            # self.indexDataPoints['train']. So we need to map it into the
+            # full column numbers
+            indexTrainPoints = (
+                              indexTrainPoints[0],
+                              self.indexDataPoints['train'][indexTrainPoints[1]]
+                                )
+            # And state that there are no new extra points
+            nTrainPointsRest = 0
+        
+        # Record the actual number of training points that we are left with
+        nTrainPoints = len(indexTrainPoints[0])
+        assert nTrainPoints == nTrainPointsRest + nTrainPointsActual
+        
         # And this is it! We got all the necessary training samples, including
         # those that we were already using.
         
         # Finally, set every other element not in the training set in the 
         # workingMatrix to zero
         workingMatrixZeroedTrain = workingMatrix.copy()      
-        workingMatrixZeroedTrain[indexTrainPoints] = 0
+        workingMatrixZeroedTrain[indexTrainPoints] = 0.
         workingMatrix = workingMatrix - workingMatrixZeroedTrain
-        assert len(np.nonzero(workingMatrix)[0]) == nTrainPointsAll 
+        assert len(np.nonzero(workingMatrix)[0]) == nTrainPoints
         # To check that the total number of nonzero elements of the matrix are
         # the total number of training samples that we're supposed to have.
         
         # Now, we finally have the incompleteMatrix only with the corresponding
         # elements: a ratioTrain proportion of training samples that, for sure,
-        # include the ones that we will use in the graph signals dataset
+        # include the ones that we will use in the graph signals dataset and, 
+        # for sure, exclude those that are in the validation and test sets.
        
         # Finally, on to compute the correlation matrix.
         # The mean required for the (u,v)th element of the correlation matrix is
@@ -1350,7 +1787,7 @@ class MovieLens(_data):
         # where \mu_{uv} is the mean we computed before
         correlationMatrix = sqSumMatrix / countMatrix - avgMatrix ** 2
         
-        # Finally, normalize the individual user variances and get ride of the
+        # Finally, normalize the individual user variances and get rid of the
         # identity matrix
         #   Compute the square root of the diagonal elements
         sqrtDiagonal = np.sqrt(np.diag(correlationMatrix))
@@ -1379,10 +1816,6 @@ class MovieLens(_data):
         diagNormalizedMatrix = np.diag(np.diag(normalizedMatrix))
         isolatedNodes = np.nonzero(np.abs(diagNormalizedMatrix + 1) \
                                                                 < zeroTolerance)
-        assert self.labelID not in isolatedNodes[0]
-        #   It is highly likely that the labelID won't be isolated node, since 
-        #   we are purposefully taking training samples that include this item,
-        #   but just in case.
         normalizedMatrix[isolatedNodes] = 0.
         #   Get rid of the "quasi-zeros" that could have arrived through 
         #   division.
@@ -1411,37 +1844,95 @@ class MovieLens(_data):
                                'extraComponents': extraComponents})
         # So far, the matrix output is the adjacency matrix of the largest 
         # connected component, and nodesToKeep refer to those nodes.
-        # However, if there are more connected components, maybe the labelID
-        # is not part of the largest.
-        if self.labelID not in nodesToKeep:
-        #   So, this is interesting: we know that labelID is not part of the
-        #   isolated nodes, because we check that before. Therefore, if it
-        #   is not part of the largest component, it has to be part of some 
-        #   other component. This implies that we do not need to check if
-        #   extraComponents is nonempty: it HAS to be nonempty.
-            assert len(extraComponents) > 0
-            # Check in each component if the labelID node is there
-            for n in range(len(extraComponents)):
-                # If it is there
-                if self.labelID in extraComponents[1][n]:
-                    # Save the corresponding adjacency matrix
-                    W = extraComponents[0][n]
-                    # And the corresponding list of nodes to keep
-                    nodesToKeep = extraComponents[1][n]
+        
+        # At this point, it can happen that some (or all) of the selected nodes
+        # are not in the graph. If none of the selected nodes is there, we
+        # should stop (we have no useful problem anymore)
+        
+        IDnodesKept = 0 # How many of the selected ID nodes are we keeping
+        for i in self.labelID:
+            if i in nodesToKeep:
+                IDnodesKept += 1
+        
+        assert IDnodesKept > 0
+        
         #   Update samples and labelID, if necessary
         if len(nodesToKeep) < N:
-            # Update labelID
-            self.labelID = nodesToKeep.index(self.labelID)
-            # Update samples
-            if self.samples['train']['signals'] is not None:
-                self.samples['train']['signals'] = \
-                                self.samples['train']['signals'][:, nodesToKeep]
-            if self.samples['valid']['signals'] is not None:
-                self.samples['valid']['signals'] = \
-                                self.samples['valid']['signals'][:, nodesToKeep]
-            if self.samples['test']['signals'] is not None:
-                self.samples['test']['signals'] = \
-                                self.samples['test']['signals'][:, nodesToKeep]
+            # Update the node IDs
+            #   Get signals, IDs and labels
+            trainSignals = self.samples['train']['signals']
+            trainIDs = self.targetIDs['train']
+            trainLabels = self.samples['train']['targets']
+            validSignals = self.samples['valid']['signals']
+            validIDs = self.targetIDs['valid']
+            validLabels = self.samples['valid']['targets']
+            testSignals = self.samples['test']['signals']
+            testIDs = self.targetIDs['test']
+            testLabels = self.samples['test']['targets']
+            #   Update the ID
+            #   Train set
+            trainIDsToKeep = [] # which samples from the train set we need to 
+                # keep (note that if some of the nodes that were labeled in the
+                # trainIDs have been vanished, then we need to get rid of those
+                # training samples)
+            newTrainIDs = [] # Then, we need to match the old node numbering
+                # (with all the nodes), to those of the new numbering
+            for i in range(len(trainIDs)):
+                # If the train ID of the sample is in nodes to keep
+                if trainIDs[i] in nodesToKeep:
+                    # We need to add it to the list of nodes to keep (what 
+                    # position in the training samples are, because those that
+                    # are not there also have to be discarded from the rating)
+                    trainIDsToKeep.append(i)
+                    # And we have to update the ID to the new one (considering
+                    # that not all nodes have been kept)
+                    newTrainIDs.append(nodesToKeep.index(trainIDs[i]))
+            trainIDsToKeep = np.array(trainIDsToKeep) # Convert to numpy
+            newTrainIDs = np.array(newTrainIDs) # Conver to numpy
+            #   Valid Set
+            validIDsToKeep = []
+            newValidIDs = []
+            for i in range(len(validIDs)):
+                if validIDs[i] in nodesToKeep:
+                    validIDsToKeep.append(i)
+                    newValidIDs.append(nodesToKeep.index(validIDs[i]))
+            validIDsToKeep = np.array(validIDsToKeep) # Convert to numpy
+            newValidIDs = np.array(newValidIDs) # Conver to numpy
+            #   Test Set
+            testIDsToKeep = []
+            newTestIDs = []
+            for i in range(len(testIDs)):
+                if testIDs[i] in nodesToKeep:
+                    testIDsToKeep.append(i)
+                    newTestIDs.append(nodesToKeep.index(testIDs[i]))
+            testIDsToKeep = np.array(testIDsToKeep) # Convert to numpy
+            newTestIDs = np.array(newTestIDs) # Conver to numpy
+            
+            # And, finally, we update the signals
+            trainSignals = trainSignals[trainIDsToKeep][:, nodesToKeep]
+            validSignals = validSignals[validIDsToKeep][:, nodesToKeep]
+            testSignals = testSignals[testIDsToKeep][:, nodesToKeep]
+            # and the IDs
+            trainIDs = newTrainIDs
+            validIDs = newValidIDs
+            testIDs = newTestIDs
+            # Also update the labels (some of the samples are gone)
+            trainLabels = trainLabels[trainIDsToKeep]
+            validLabels = validLabels[validIDsToKeep]
+            testLabels = testLabels[testIDsToKeep]
+            # and store them where they belong
+            self.nTrain = trainSignals.shape[0]
+            self.nValid = validSignals.shape[0]
+            self.nTest = testSignals.shape[0]
+            self.samples['train']['signals'] = trainSignals
+            self.samples['train']['targets'] = trainLabels
+            self.targetIDs['train'] = trainIDs
+            self.samples['valid']['signals'] = validSignals
+            self.samples['valid']['targets'] = validLabels
+            self.targetIDs['valid'] = validIDs
+            self.samples['test']['signals'] = testSignals
+            self.samples['test']['targets'] = testLabels
+            self.targetIDs['test'] = testIDs
             # If the graph type is 'movies', then any removed node has a
             # repercusion in the movie list, and therefore, we need to update
             # that as well
@@ -1462,6 +1953,94 @@ class MovieLens(_data):
         #   And finally, sparsify it (nearest neighbors)
         self.adjacencyMatrix = graph.sparsifyGraph(W, 'NN', self.kNN)
         
+    def interpolateRatings(self):
+        # For the nonzero nodes, we will average the value of the closest
+        # nonzero elements.
+        
+        # So we need to find the neighborhood, iteratively, until we find a
+        # nodes in the neighborhood that have nonzero elements. And then
+        # average those.
+        
+        # There are three sets of signals, so for each one of them
+        for key in self.samples.keys():
+            # Get the signals
+            thisSignal = self.samples[key]['signals'] # B x N
+            # Look for the elements in the signal that are zero
+            zeroLocations = np.nonzero(np.abs(thisSignal) < zeroTolerance)
+            # This is a tuple with two elements, each element is a 1-D np.array
+            # with the rows and column indices of the zero elements, respectiv
+            # The columns are the nodes, so we should iterate by nodes. The 
+            # problem is that I do not want to go ahead finding the neighborhood
+            # each time, and I do not want to go ahead element by element, I
+            # want to go node by node, so that I have to do at most N searches
+            
+            # Not a good idea. Let's do it by neighborhood, since I can get
+            # all neighbors at once
+            # If there are zero locations that need to be interpolated
+            K = 1
+            while len(zeroLocations[0]) > 0:
+                # Location of nodes with zero value
+                zeroNodes = np.unique(zeroLocations[1])
+                # If we want to make this faster, we only want the neighborhoods
+                # of the nodes that don't have a value yet.
+                # The problem is that the computeNeighborhood function only
+                # works on the first N values, so we need to reorder the matrix
+                # so that the first elements are the nodes we actually want
+                # To do this, we need to add the rest of the nodes to the list
+                # of zeroNodes and then reorder the matrix
+                #   Full nodes
+                fullNodes = [n for n in range(thisSignal.shape[1]) if n not in zeroNodes]
+                fullNodes = np.array(fullNodes, dtype=np.int)
+                #   Complete list of nodes (concatenate them)
+                allNodes = np.concatenate((zeroNodes, fullNodes))
+                #   Reorder the matrix
+                A = self.adjacencyMatrix[allNodes, :][:, allNodes]
+                # Get the neighborhood
+                nbList = graph.computeNeighborhood(A, K, N = len(zeroNodes))
+                # This is a list of lists. Each node has associated a list of
+                # neighboring nodes.
+                # But the index of this neighboring nodes is not correct, 
+                # because it belongs to the allNodes ordering and not the 
+                # original one.
+                #   
+                # Go for each node, and pick up the neighboring values
+                # (It is more likely that we will have more samples than
+                # nodes, so it should be faster to iterate through nodes)
+                
+                # For each element in the neighborhood list
+                for i in range(len(nbList)):
+                    # Get the actual node
+                    thisNode = zeroNodes[i]
+                    # Get the neighborhood (and map it to the corresponding
+                    # nodes in the original ordering)
+                    thisNB = [allNodes[n] for n in nbList[i]]
+                    # Now, get the values at the neighborhood (which is now
+                    # in the original ordering)
+                    nbValues = thisSignal[:,thisNB]
+                    #   This gives all the neighboring values of each batch
+                    # Average the nonzero elements
+                    #   Sum of the elements
+                    sumSignal = np.sum(nbValues, axis = 1)
+                    #   Count of nonzero elements
+                    countNZ = np.count_nonzero(nbValues, axis = 1)
+                    #   Get rid of the zero elements for division
+                    countNZ[countNZ == 0] = 1.
+                    #   Compute the average and round to an integer
+                    meanSignal = np.round(sumSignal / countNZ)
+                    # And now we need to place this newly computed mean 
+                    # signal back in the nonzero elements
+                    zeroBatches = zeroLocations[0][zeroLocations[1] == thisNode]
+                    # Add it to the signal
+                    thisSignal[zeroBatches, thisNode] = meanSignal[zeroBatches]
+                # Now that we have finished all nodes for the K-hop neighbors
+                # we need to update the zero elements
+                zeroLocations = np.nonzero(np.abs(thisSignal) < zeroTolerance)
+                # and add a new neighborhood
+                K += 1
+            
+            # And put it back where it goes
+            self.samples[key]['signals'] = thisSignal
+        
     def getIncompleteMatrix(self):
         
         return self.incompleteMatrix
@@ -1474,9 +2053,47 @@ class MovieLens(_data):
         
         return self.movieTitles
     
-    def getLabelID(self):
+    def getLabelID(self, *args):
         
-        return self.labelID
+        # So, here are the options
+        # No arguments: return the list of self.labelID
+        # One argument: it has to be samplesType and then return all labelIDs
+        # for that sample type
+        # Two arguments, can either be list or int, and return at random, like
+        # the getSamples() method
+        
+        if len(args) == 0:
+            returnID = self.labelID
+        else:
+            # The first argument has to be the sample type
+            samplesType = args[0]
+            # Check that is one of the possibilities
+            assert samplesType == 'train' or samplesType == 'valid' \
+                    or samplesType == 'test'
+                    
+            returnID = self.targetIDs[samplesType]
+            
+            if len(args) == 2:
+                # If it is an int, just return that number of randomly chosen
+                # IDs
+                if type(args[1]) is int:
+                    # Total number of samples
+                    nSamples = returnID.shape
+                    # Check that we are asked to return a number of samples that
+                    # we actually have
+                    assert args[1] <= nSamples
+                    # Randomly choose args[1] indices
+                    selectedIndices = np.random.choice(nSamples, size = args[1],
+                                                       replace = False)
+                    # Select the corresponding IDs
+                    returnID = returnID[selectedIndices]
+                
+                else:
+                    # This has to be a list () or an np.array which can serve
+                    # as indexing functions
+                    returnID = returnID[args[1]]
+        
+        return returnID
     
     def evaluate(self, yHat, y):
         # y and yHat should be of the same dimension, where dimension 0 is the
@@ -1493,20 +2110,6 @@ class MovieLens(_data):
             y = y.unsqueeze(0)
             yHat = yHat.unsqueeze(0)
         
-        #If it is a categorical variable
-        if self.categorical:
-            # We need to convert the categories into the corresponding hardmax
-            if 'torch' in repr(self.dataType):
-                #   We compute the target label (hardmax)
-                yHat = torch.argmax(yHat, dim = 1).type(self.dataType)
-                y = y.type(self.dataType)
-            else:
-                yHat = np.array(yHat)
-                y = np.array(y)
-                #   We compute the target label (hardmax)
-                yHat = np.argmax(yHat, axis = 1).astype(yHat.dtype)
-                y = y.astype(yHat.dtype)
-        
         # Now, we compute the RMS
         if 'torch' in repr(self.dataType):
             mse = torch.nn.functional.mse_loss(yHat, y)
@@ -1519,15 +2122,9 @@ class MovieLens(_data):
     
     def astype(self, dataType):
         # This changes the type for the incomplete and adjacency matrix.
-        if repr(dataType).find('torch') == -1:
-            self.incompleteMatrix = dataType(self.incompleteMatrix)
-            self.adjacencyMatrix = dataType(self.adjacencyMatrix)
-        else:
-            self.incompleteMatrix = torch.tensor(self.incompleteMatrix)\
-                                                                 .type(dataType)
-            self.adjacencyMatrix = torch.tensor(self.adjacencyMatrix)\
-                                                                 .type(dataType)
-
+        self.incompleteMatrix = changeDataType(self.incompleteMatrix, dataType)
+        self.adjacencyMatrix = changeDataType(self.adjacencyMatrix, dataType)
+        
         # And now, initialize to change the samples as well (and also save the 
         # data type)
         super().astype(dataType)
@@ -1535,7 +2132,7 @@ class MovieLens(_data):
     
     def to(self, device):
         # If the dataType is 'torch'
-        if repr(self.dataType).find('torch') >= 0:
+        if 'torch' in repr(self.dataType):
             # Change the stored attributes that are not handled by the inherited
             # method to().
             self.incompleteMatrix.to(device)
@@ -1543,536 +2140,3 @@ class MovieLens(_data):
             # And call the inherit method to initialize samples (and save to
             # device)
             super().to(device)
-            
-class TwentyNews(_dataForClassification):
-    """
-    TwentyNews: Loads and handles handles the 20NEWS dataset
-
-    Initialization:
-
-    Input:
-        ratioValid (float): ratio of the train texts to be part of the
-            validation set
-        nWords (int): number of words to consider (i.e. the nWords most frequent
-            words in the news articles are kept, the rest, discarded)
-        nWordsShortDocs (int): any article with less words than nWordsShortDocs
-            are discarded.
-        nEdges (int): how many edges to keep after creating a geometric graph
-            considering the graph embedding of each new article.
-        distMetric (string): function to use to compute the distance between
-            articles in the embedded space.
-        dataDir (string): directory where to download the 20News dataset to/
-            to check if it has already been downloaded
-        dataType (dtype): type of loaded data (default: np.float64)
-        device (device): where to store the data (e.g., 'cpu', 'cuda:0', etc.)
-
-    Methods:
-        
-    .getData(dataSubset): loads the data belonging to dataSubset (i.e. 'train' 
-        or 'test')
-    
-    .embedData(): compute the graph embedding of the training dataset after
-        it has been loaded
-    
-    .normalizeData(normType): normalize the data in the embedded space following
-        a normType norm.
-    
-    .createValidationSet(ratio): stores ratio% of the training set as validation
-        set.
-        
-    .createGraph(): uses the word2vec embedding of the training set to compute
-        a geometric graph
-        
-    .getGraph(): fetches the adjacency matrix of the stored graph
-    
-    .getNumberOfClasses(): fetches the number of classes
-    
-    .reduceDataset(nTrain, nValid, nTest): reduces the dataset by randomly
-        selected nTrain, nValid and nTest samples from the training, validation
-        and testing datasets, respectively.
-        
-    authorData = .getAuthorData(samplesType, selectData, [, optionalArguments])
-    
-        Input:
-            samplesType (string): 'train', 'valid', 'test' or 'all' to determine
-                from which dataset to get the raw author data from
-            selectData (string): 'WAN' or 'wordFreq' to decide if we want to
-                retrieve either the WAN of each excerpt or the word frequency
-                count of each excerpt
-            optionalArguments:
-                0 optional arguments: get all the samples from the specified set
-                1 optional argument (int): number of samples to get (at random)
-                1 optional argument (list): specific indices of samples to get
-        
-        Output:
-            Either the WANs or the word frequency count of all the excerpts of
-            the selected author
-            
-    .createGraph(): creates a graph from the WANs of the excerpt written by the
-        selected author available in the training set. The fusion of this WANs
-        is done in accordance with the input options following 
-        graphTools.createGraph().
-        The resulting adjacency matrix is stored.
-        
-    .getGraph(): fetches the stored adjacency matrix and returns it
-    
-    .getFunctionWords(): fetches the list of functional words. Returns a tuple
-        where the first element correspond to all the functional words in use, 
-        and the second element consists of all the functional words available.
-        Obs.: When we created the graph, some of the functional words might have
-        been dropped in order to make it connected, for example.
-
-    signals, labels = .getSamples(samplesType[, optionalArguments])
-        Input:
-            samplesType (string): 'train', 'valid' or 'test' to determine from
-                which dataset to get the samples from
-            optionalArguments:
-                0 optional arguments: get all the samples from the specified set
-                1 optional argument (int): number of samples to get (at random)
-                1 optional argument (list): specific indices of samples to get
-        Output:
-            signals (dtype.array): numberSamples x numberNodes
-            labels (dtype.array): numberSamples
-            >> Obs.: The 0th dimension matches the corresponding signal to its
-                respective label
-
-    .astype(type): change the type of the data matrix arrays.
-        Input:
-            type (dtype): target type of the variables (e.g. torch.float64,
-                numpy.float64, etc.)
-
-    .to(device): if dtype is torch.tensor, move them to the specified device.
-        Input:
-            device (string): target device to move the variables to (e.g. 'cpu',
-                'cuda:0', etc.)
-
-    accuracy = .evaluate(yHat, y, tol = 1e-9)
-        Input:
-            yHat (dtype.array): estimated labels (1-D binary vector)
-            y (dtype.array): correct labels (1-D binary vector)
-            >> Obs.: both arrays are of the same length
-            tol (float): numerical tolerance to consider two numbers to be equal
-        Output:
-            accuracy (float): proportion of correct labels
-
-    """
-    def __init__(self, ratioValid, nWords, nWordsShortDocs, nEdges, distMetric,
-                 dataDir, dataType = np.float64, device = 'cpu'):
-        
-        super().__init__()
-        # This creates the attributes: dataType, device, nTrain, nTest, nValid,
-        # and samples, and fills them all with None, and also creates the 
-        # methods: getSamples, astype, to, and evaluate.
-        self.dataType = dataType
-        self.device = device
-        
-        # Other relevant information we need to store:
-        self.dataDir = dataDir # Where the data is
-        self.N = nWords # Number of nodes
-        self.nWordsShortDocs = nWordsShortDocs # Number of words under which
-            # a document is too short to be taken into consideration
-        self.M = nEdges # Number of edges
-        self.distMetric = distMetric # Distance metric to use
-        self.dataset = {} # Here we save the dataset classes as they are
-            # handled by mdeff's code
-        self.nClasses = None # Number of classes
-        self.vocab = None # Words considered
-        self.graphData = None # Store the data (word2vec embeddings) required
-            # to build the graph
-        self.adjacencyMatrix = None # Store the graph built from the loaded
-            # data
-    
-        # Get the training dataset. Saves vocab, dataset, and samples
-        self.getData('train')
-        # Embeds the data following the N words and a word2vec approach, saves
-        # the embedded vectors in graphData, and updates vocab to keep only
-        # the N words selected
-        self.embedData()
-        # Get the testing dataset, only for the words stored in vocab.
-        self.getData('test')
-        # Normalize
-        self.normalizeData()
-        # Save number of samples
-        self.nTrain = self.samples['train']['labels'].shape[0]
-        self.nTest = self.samples['test']['labels'].shape[0]
-        # Create validation set
-        self.createValidationSet(ratioValid)
-        # Create graph
-        self.createGraph() # Only after data has been embedded
-        # Change data to specified type and device
-        self.astype(self.dataType)
-        self.to(self.device)
-        
-    def getData(self, dataSubset):
-        
-        # Load dataset
-        dataset = Text20News(data_home = self.dataDir,
-                             subset = dataSubset,
-                             remove = ('headers','footers','quotes'),
-                             shuffle = True)
-        # Get rid of numbers and other stuff
-        dataset.clean_text(num='substitute')
-        # If there's some vocabulary already defined, vectorize (count the
-        # frequencies) of the words in vocab, if not, count all of them
-        if self.vocab is None:
-            dataset.vectorize(stop_words='english')
-            self.vocab = dataset.vocab
-        else:
-            dataset.vectorize(vocabulary = self.vocab)
-    
-        # Get rid of short documents
-        if dataSubset == 'train':
-            dataset.remove_short_documents(nwords = self.nWordsShortDocs,
-                                           vocab = 'full')
-            # Get rid of images
-            dataset.remove_encoded_images()
-            self.nClasses = len(dataset.class_names)
-        else:
-            dataset.remove_short_documents(nwords = self.nWordsShortDocs,
-                                           vocab = 'selected')
-        
-        # Save them in the corresponding places
-        self.samples[dataSubset]['signals'] = dataset.data.toarray()
-        self.samples[dataSubset]['labels'] = dataset.labels
-        self.dataset[dataSubset] = dataset
-        
-    def embedData(self):
-        
-        # We need to have loaded the training dataset first.
-        assert 'train' in self.dataset.keys()
-        # Embed them (word2vec embedding)
-        self.dataset['train'].embed()
-        # Keep only the top words (which determine the number of nodes)
-        self.dataset['train'].keep_top_words(self.N)
-        # Update the vocabulary
-        self.vocab = self.dataset['train'].vocab
-        # Get rid of short documents when considering only the specific 
-        # vocabulary
-        self.dataset['train'].remove_short_documents(
-                                                  nwords = self.nWordsShortDocs,
-                                                  vocab = 'selected')
-        # Save the embeddings, which are necessary to build a graph
-        self.graphData = self.dataset['train'].embeddings
-        # Update the samples
-        self.samples['train']['signals'] = self.dataset['train'].data.toarray()
-        self.samples['train']['labels'] = self.dataset['train'].labels
-        # If there's an existing dataset, update it to the new vocabulary
-        if 'test' in self.dataset.keys():
-            self.dataset['test'].vectorize(vocabulary = self.vocab)
-            # Update the samples
-            self.samples['test']['signals'] =self.dataset['test'].data.toarray()
-            self.samples['test']['labels'] = self.dataset['test'].labels
-        
-    def normalizeData(self, normType = 'l1'):
-        
-        for key in self.dataset.keys():
-            # Normalize the frequencies on the l1 norm.
-            self.dataset[key].normalize(norm = normType)
-            # And save it
-            self.samples[key]['signals'] = self.dataset[key].data.toarray()
-            self.samples[key]['labels'] = self.dataset[key].labels
-            
-    def createValidationSet(self, ratio):
-        # How many valid samples
-        self.nValid = int(ratio * self.nTrain)
-        # Shuffle indices
-        randomIndices = np.random.permutation(self.nTrain)
-        validationIndices = randomIndices[0:self.nValid]
-        trainIndices = randomIndices[self.nValid:]
-        # Fetch those samples and put them in the validation set
-        self.samples['valid']['signals'] = self.samples['train']['signals']\
-                                                          [validationIndices, :]
-        self.samples['valid']['labels'] = self.samples['train']['labels']\
-                                                             [validationIndices]
-        # And update the training set
-        self.samples['train']['signals'] = self.samples['train']['signals']\
-                                                               [trainIndices, :]
-        self.samples['train']['labels'] = self.samples['train']['labels']\
-                                                                  [trainIndices]
-        # Update the numbers
-        self.nValid = self.samples['valid']['labels'].shape[0]
-        self.nTrain = self.samples['train']['labels'].shape[0]
-            
-    def createGraph(self, *args):
-        
-        assert self.graphData is not None
-        assert len(args) == 0 or len(args) == 2
-        if len(args) == 2:
-            self.M = args[0] # Number of edges
-            self.distMetric = args[1] # Distance metric
-        dist, idx = distance_sklearn_metrics(self.graphData, k = self.M,
-                                             metric = self.distMetric)
-        self.adjacencyMatrix = adjacency(dist, idx).toarray()
-        
-    def getGraph(self):
-        
-        return self.adjacencyMatrix
-    
-    def getNumberOfClasses(self):
-        
-        return self.nClasses
-    
-    def reduceDataset(self, nTrain, nValid, nTest):
-        if nTrain < self.nTrain:
-            randomIndices = np.random.permutation(self.nTrain)
-            trainIndices = randomIndices[0:nTrain]
-            # And update the training set
-            self.samples['train']['signals'] = self.samples['train']\
-                                                           ['signals']\
-                                                           [trainIndices, :]
-            self.samples['train']['labels'] = self.samples['train']\
-                                                          ['labels']\
-                                                          [trainIndices]
-            self.nTrain = nTrain
-        if nValid < self.nValid:
-            randomIndices = np.random.permutation(self.nValid)
-            validIndices = randomIndices[0:nValid]
-            # And update the training set
-            self.samples['valid']['signals'] = self.samples['valid']\
-                                                           ['signals']\
-                                                           [validIndices, :]
-            self.samples['valid']['labels'] = self.samples['valid']\
-                                                          ['labels']\
-                                                          [validIndices]
-            self.nValid = nValid
-        if nTest < self.nTest:
-            randomIndices = np.random.permutation(self.nTest)
-            testIndices = randomIndices[0:nTest]
-            # And update the training set
-            self.samples['test']['signals'] = self.samples['test']\
-                                                           ['signals']\
-                                                           [testIndices, :]
-            self.samples['test']['labels'] = self.samples['test']\
-                                                          ['labels']\
-                                                          [testIndices]
-            self.nTest = nTest
-    
-    def astype(self, dataType):
-        # This changes the type for the graph data, as well as the adjacency
-        # matrix. We are going to leave the dataset attribute as it is, since
-        # this is the most accurate reflection of mdeff's code.
-        if repr(dataType).find('torch') == -1:
-            self.graphData = dataType(self.graphData)
-            self.adjacencyMatrix = dataType(self.adjacencyMatrix)
-        else:
-            self.graphData = torch.tensor(self.graphData).type(dataType)
-            self.adjacencyMatrix = torch.tensor(self.adjacencyMatrix)\
-                                        .type(dataType)
-
-        # And now, initialize to change the samples as well (and also save the 
-        # data type)
-        super().astype(dataType)
-        
-    
-    def to(self, device):
-        # If the dataType is 'torch'
-        if repr(self.dataType).find('torch') >= 0:
-            # Change the stored attributes that are not handled by the inherited
-            # method to().
-            self.graphData.to(device)
-            self.adjacencyMatrix.to(device)
-            # And call the inherit method to initialize samples (and save to
-            # device)
-            super().to(device)
-    
-# Copied almost verbatim from the code by Michäel Defferrard, available at
-# http://github.com/mdeff/cnn_graph
-
-#import gensim
-import sklearn, sklearn.datasets, sklearn.metrics
-import scipy.sparse
-
-import re
-
-def distance_sklearn_metrics(z, k=4, metric='euclidean'):
-	"""Compute exact pairwise distances."""
-	d = sklearn.metrics.pairwise.pairwise_distances(
-			z, metric=metric)
-	# k-NN graph.
-	idx = np.argsort(d)[:, 1:k+1]
-	d.sort()
-	d = d[:, 1:k+1]
-	return d, idx
-
-def adjacency(dist, idx):
-	"""Return the adjacency matrix of a kNN graph."""
-	M, k = dist.shape
-	assert M, k == idx.shape
-	assert dist.min() >= 0
-
-	# Weights.
-	sigma2 = np.mean(dist[:, -1])**2
-	dist = np.exp(- dist**2 / sigma2)
-
-	# Weight matrix.
-	I = np.arange(0, M).repeat(k)
-	J = idx.reshape(M*k)
-	V = dist.reshape(M*k)
-	W = scipy.sparse.coo_matrix((V, (I, J)), shape=(M, M))
-
-	# No self-connections.
-	W.setdiag(0)
-
-	# Non-directed graph.
-	bigger = W.T > W
-	W = W - W.multiply(bigger) + W.T.multiply(bigger)
-
-	assert W.nnz % 2 == 0
-	assert np.abs(W - W.T).mean() < 1e-10
-	assert type(W) is scipy.sparse.csr.csr_matrix
-	return W
-
-def replace_random_edges(A, noise_level):
-	"""Replace randomly chosen edges by random edges."""
-	M, M = A.shape
-	n = int(noise_level * A.nnz // 2)
-
-	indices = np.random.permutation(A.nnz//2)[:n]
-	rows = np.random.randint(0, M, n)
-	cols = np.random.randint(0, M, n)
-	vals = np.random.uniform(0, 1, n)
-	assert len(indices) == len(rows) == len(cols) == len(vals)
-
-	A_coo = scipy.sparse.triu(A, format='coo')
-	assert A_coo.nnz == A.nnz // 2
-	assert A_coo.nnz >= n
-	A = A.tolil()
-
-	for idx, row, col, val in zip(indices, rows, cols, vals):
-		old_row = A_coo.row[idx]
-		old_col = A_coo.col[idx]
-
-		A[old_row, old_col] = 0
-		A[old_col, old_row] = 0
-		A[row, col] = 1
-		A[col, row] = 1
-
-	A.setdiag(0)
-	A = A.tocsr()
-	A.eliminate_zeros()
-	return A
-        
-class TextDataset(object):
-    def clean_text(self, num='substitute'):
-        # TODO: stemming, lemmatisation
-        for i,doc in enumerate(self.documents):
-            # Digits.
-            if num is 'spell':
-                doc = doc.replace('0', ' zero ')
-                doc = doc.replace('1', ' one ')
-                doc = doc.replace('2', ' two ')
-                doc = doc.replace('3', ' three ')
-                doc = doc.replace('4', ' four ')
-                doc = doc.replace('5', ' five ')
-                doc = doc.replace('6', ' six ')
-                doc = doc.replace('7', ' seven ')
-                doc = doc.replace('8', ' eight ')
-                doc = doc.replace('9', ' nine ')
-            elif num is 'substitute':
-                # All numbers are equal. Useful for embedding
-                # (countable words) ?
-                doc = re.sub('(\\d+)', ' NUM ', doc)
-            elif num is 'remove':
-                # Numbers are uninformative (they are all over the place).
-                # Useful for bag-of-words ?
-                # But maybe some kind of documents contain more numbers,
-                # e.g. finance.
-                # Some documents are indeed full of numbers. At least
-                # in 20NEWS.
-                doc = re.sub('[0-9]', ' ', doc)
-            # Remove everything except a-z characters and single space.
-            doc = doc.replace('$', ' dollar ')
-            doc = doc.lower()
-            doc = re.sub('[^a-z]', ' ', doc)
-            doc = ' '.join(doc.split()) # same as 
-                                        # doc = re.sub('\s{2,}', ' ', doc)
-            self.documents[i] = doc
-
-    def vectorize(self, **params):
-        # TODO: count or tf-idf. Or in normalize ?
-        vectorizer = sklearn.feature_extraction.text.CountVectorizer(**params)
-        self.data = vectorizer.fit_transform(self.documents)
-        self.vocab = vectorizer.get_feature_names()
-        assert len(self.vocab) == self.data.shape[1]
-
-    def keep_documents(self, idx):
-        """Keep the documents given by the index, discard the others."""
-        self.documents = [self.documents[i] for i in idx]
-        self.labels = self.labels[idx]
-        self.data = self.data[idx,:]
-
-    def keep_words(self, idx):
-        """Keep the documents given by the index, discard the others."""
-        self.data = self.data[:,idx]
-        self.vocab = [self.vocab[i] for i in idx]
-        try:
-            self.embeddings = self.embeddings[idx,:]
-        except AttributeError:
-            pass
-
-    def remove_short_documents(self, nwords, vocab='selected'):
-        """Remove a document if it contains less than nwords."""
-        if vocab is 'selected':
-            # Word count with selected vocabulary.
-            wc = self.data.sum(axis=1)
-            wc = np.squeeze(np.asarray(wc))
-        elif vocab is 'full':
-            # Word count with full vocabulary.
-            wc = np.empty(len(self.documents), dtype=np.int)
-            for i,doc in enumerate(self.documents):
-                wc[i] = len(doc.split())
-        idx = np.argwhere(wc >= nwords).squeeze()
-        self.keep_documents(idx)
-
-    def keep_top_words(self, M):
-        """Keep in the vocaluary the M words who appear most often."""
-        freq = self.data.sum(axis=0)
-        freq = np.squeeze(np.asarray(freq))
-        idx = np.argsort(freq)[::-1]
-        idx = idx[:M]
-        self.keep_words(idx)
-
-    def normalize(self, norm='l1'):
-        """Normalize data to unit length."""
-        # TODO: TF-IDF.
-        data = self.data.astype(np.float64)
-        self.data = sklearn.preprocessing.normalize(data, axis=1, norm=norm)
-
-    def embed(self, filename=None, size=100):
-        """Embed the vocabulary using pre-trained vectors."""
-        if filename:
-            model = gensim.models.Word2Vec.load_word2vec_format(filename,
-                                                                binary=True)
-            size = model.vector_size
-        else:
-            class Sentences(object):
-                def __init__(self, documents):
-                    self.documents = documents
-                def __iter__(self):
-                    for document in self.documents:
-                        yield document.split()
-            model = gensim.models.Word2Vec(Sentences(self.documents), size=size)
-        self.embeddings = np.empty((len(self.vocab), size))
-        keep = []
-        not_found = 0
-        for i,word in enumerate(self.vocab):
-            try:
-                self.embeddings[i,:] = model[word]
-                keep.append(i)
-            except KeyError:
-                not_found += 1
-        self.keep_words(keep)
-        
-    def remove_encoded_images(self, freq=1e3):
-        widx = self.vocab.index('ax')
-        wc = self.data[:,widx].toarray().squeeze()
-        idx = np.argwhere(wc < freq).squeeze()
-        self.keep_documents(idx)
-
-class Text20News(TextDataset):
-    def __init__(self, **params):
-        dataset = sklearn.datasets.fetch_20newsgroups(**params)
-        self.documents = dataset.data
-        self.labels = dataset.target
-        self.class_names = dataset.target_names
-        assert max(self.labels) + 1 == len(self.class_names)

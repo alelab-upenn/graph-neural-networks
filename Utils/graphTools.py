@@ -1,5 +1,6 @@
-# 2018/12/03~2018/07/12
+# 2018/12/03~
 # Fernando Gama, fgama@seas.upenn.edu.
+# Luana Ruiz, rubruiz@seas.upenn.edu.
 """
 graphTools.py Tools for handling graphs
 
@@ -217,7 +218,9 @@ def computeNonzeroRows(S, Nl = 'all'):
 
 def computeNeighborhood(S, K, N = 'all', nb = 'all', outputType = 'list'):
     """
-    computeNeighborhood: compute the K-hop neighborhood of a graph
+    computeNeighborhood: compute the set of nodes within the K-hop neighborhood
+        of a graph (i.e. all nodes that can be reached within K-hops of each
+        node)
 
         computeNeighborhood(W, K, N = 'all', nb = 'all', outputType = 'list')
 
@@ -227,7 +230,7 @@ def computeNeighborhood(S, K, N = 'all', nb = 'all', outputType = 'list'):
         N (int or 'all'): how many nodes (from top) to compute the neighbors
             from (default: 'all').
         nb (int or 'all'): how many nodes to consider valid when computing the
-            neighborhood (i.e. nodes beyhond nb are not trimmed out of the
+            neighborhood (i.e. nodes beyond nb are not trimmed out of the
             neighborhood; note that nodes smaller than nb that can be reached
             by nodes greater than nb, are included. default: 'all')
         outputType ('list' or 'matrix'): choose if the output is given in the
@@ -319,18 +322,22 @@ def computeNeighborhood(S, K, N = 'all', nb = 'all', outputType = 'list'):
         for k in range(1,K):
             # For each of the nodes we care about
             for i in range(N):
+                # Store the new neighbors to be included for node i
+                newNeighbors = []
                 # Take each of the neighbors we already have
                 for j in neighbors[i]:
                     # and if we haven't visited those neighbors yet
                     if j not in visitedNodes[i]:
                         # Just look for our neighbor's one-hop neighbors and
                         # add them to the neighborhood list
-                        neighbors[i].extend(oneHopNeighbors[j])
+                        newNeighbors.extend(oneHopNeighbors[j])
                         # And don't forget to add the node to the visited ones
                         # (we already have its one-hope neighborhood)
                         visitedNodes[i].append(j)
-                # And now that we have added all the new neighbors, we just
-                # get rid of those that appear more than once
+                # And now that we have added all the new neighbors, we add them
+                # to the old neighbors
+                neighbors[i].extend(newNeighbors)
+                # And get rid of those that appear more than once
                 neighbors[i] = list(set(neighbors[i]))
 
     # Now that all nodes have been collected, get rid of those beyond nb
@@ -1362,12 +1369,12 @@ def compute_perm(parents):
             #print('indices_node: {}'.format(indices_node))
 
             # Add a node to go with a singelton.
-            if len(indices_node) is 1:
+            if len(indices_node) == 1:
                 indices_node.append(pool_singeltons)
                 pool_singeltons += 1
                 #print('new singelton: {}'.format(indices_node))
             # Add two nodes as children of a singelton in the parent.
-            elif len(indices_node) is 0:
+            elif len(indices_node) == 0:
                 indices_node.append(pool_singeltons+0)
                 indices_node.append(pool_singeltons+1)
                 pool_singeltons += 2
