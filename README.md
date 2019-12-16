@@ -16,6 +16,26 @@ F. Gama, A. G. Marques, G. Leus, and A. Ribeiro, "[Convolutional Neural Network 
 
 We note that some specific [architectures](#architectures) have specific paper citation to adequately acknowledge the respective contributors.
 
+Other papers on GNNs by the authors are
+
+L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Invariance-Preserving Localized Activation Functions for Graph Neural Networks](http://arxiv.org/abs/1903.12575)," _IEEE Trans. Signal Process._, 5 Nov. 2019, accepted for publication.
+
+L. Ruiz, F. Gama, and A. Ribeiro, "[Gated Graph Convolutional Recurrent Neural Networks](http://arxiv.org/abs/1903.01888)," in _27th Eur. Signal Process. Conf._ A Coruña, Spain: Eur. Assoc. Signal Process., 2-6 Sep. 2019.
+
+E. Isufi, F. Gama, and A. Ribeiro, "[Generalizing Graph Convolutional Neural Networks with Edge-Variant Recursions on Graphs](https://arxiv.org/abs/1903.01298)," in _27th Eur. Signal Process. Conf._ A Coruña, Spain: Eur. Assoc. Signal Process., 2-6 Sep. 2019.
+
+F. Gama, J. Bruna, and A. Ribeiro, "[Stability Properties of Graph Neural Networks](http://arxiv.org/abs/1905.04497),"
+arXiv:1905.04497v2, 4 Sep. 2019, submitted to _IEEE Trans. Signal Process._
+
+F. Gama, J. Bruna, and A. Ribeiro, "[Stability of Graph Scattering Transforms](http://arxiv.org/abs/1906.04784)," in _33rd Conf. Neural Inform. Process. Syst._ Vancouver, BC: Neural Inform. Process. Syst. Foundation, 8-14 Dec. 2019.
+
+F. Gama, A. Ribeiro, and J. Bruna, "[Diffusion Scattering Transforms on Graphs](http://openreview.net/forum?id=BygqBiRcFQ)," in _7th Int. Conf. Learning Representations._ New Orleans, LA: Assoc. Comput. Linguistics, 6-9 May 2019, pp. 1–12.
+
+F. Gama, A. G. Marques, A. Ribeiro, and G. Leus, "[MIMO Graph Filters for Convolutional Networks](http://ieeexplore.ieee.org/document/8445934)," in _19th IEEE Int. Workshop Signal Process. Advances in Wireless Commun._ Kalamata, Greece: IEEE, 25-28 June 2018, pp. 1–5.
+
+F. Gama, G. Leus, A. G. Marques, and A. Ribeiro, "[Convolutional Neural Networks via Node-Varying Graph Filters](https://ieeexplore.ieee.org/document/8439899)," in _2018 IEEE Data Sci. Workshop._ Lausanne, Switzerland: IEEE, 4-6 June 2018, pp. 220–224.
+
+
 ## Introduction <a class="anchor" id="introduction"></a>
 
 We consider data supported by an underlying graph with _N_ nodes. We describe the graph in terms of an _N x N_ matrix _S_ that respects the sparsity of the graph. That is, the element _(i,j)_ of matrix _S_ can be nonzero, if and only if, _i=j_ or _(j,i)_ is an edge of the graph. Examples of such matrices are the adjacency matrix, the graph Laplacian, the Markov matrix, and many normalized counterparts. In general, we refer to this matrix _S_ as the __graph shift operator__ (GSO). This code supports extension to a tensor GSO whenever we want to assign a vector weight to each edge, instead of a scalar weight.
@@ -38,25 +58,21 @@ The library is written in [Python3](http://www.python.org/), drawing heavily fro
 
 ### Dependencies <a class="anchor" id="dependencies"></a>
 
-The required packages are <code>os</code>, <code>numpy</code>, <code>matplotlib</code>, <code>pickle</code>, <code>datetime</code>, <code>scipy.io</code>, <code>copy</code>, <code>torch</code>, <code>scipy</code>, <code>math</code>, and <code>sklearn</code>. Additionally, to handle specific datasets listed below, the following are also required <code>hdf5storage</code>, <code>urllib</code>, <code>zipfile</code>, <code>gzip</code>, <code>shutil</code>, <code>gensim</code>, and <code>re</code>; and to handle tensorboard visualization, also include <code>glob</code>, <code>torchvision</code>, <code>operator</code> and <code>tensorboardX</code>.
+The required packages are <code>os</code>, <code>numpy</code>, <code>matplotlib</code>, <code>pickle</code>, <code>datetime</code>, <code>scipy.io</code>, <code>copy</code>, <code>torch</code>, <code>scipy</code>, <code>math</code>, and <code>sklearn</code>. Additionally, to handle specific datasets listed below, the following are also required <code>hdf5storage</code>, <code>urllib</code>, <code>zipfile</code>, <code>gzip</code> and <code>shutil</code>; and to handle tensorboard visualization, also include <code>glob</code>, <code>torchvision</code>, <code>operator</code> and <code>tensorboardX</code>.
 
 ### Datasets <a class="anchor" id="datasets"></a>
 
 The different datasets involved graph data that are available in this library are the following ones.
 
-<p>1. 20NEWS dataset, available through the <code>sklearn.datasets</code> library (credit is due to <a href="http://github.com/mdeff/cnn_graph/blob/master/nips2016/20news.ipynb">M. Defferrard</a> for creating many of the functions that handle this dataset). When using this dataset, please cite</p>
-
-T. Joachims, "Analysis of the Rocchio Algorithm with TFIDF for Text Categorization", in _14th Int. Conf. Mach. Learning_. Nashville, TN, 8-12 July 1997.
-
-<p>2. Authorship attribution dataset, available under <code>datasets/authorshipData</code> (note that the available .rar files have to be uncompressed into the <code>authorshipData.mat</code> to be able to use that dataset with the provided code). When using this dataset, please cite</p>
+<p>1. Authorship attribution dataset, available under <code>datasets/authorshipData</code> (note that the available .rar files have to be uncompressed into the <code>authorshipData.mat</code> to be able to use that dataset with the provided code). When using this dataset, please cite</p>
 
 S. Segarra, M. Eisen, and A. Ribeiro, "[Authorship attribution through function word adjacency networks](http://ieeexplore.ieee.org/document/6638728)," _IEEE Trans. Signal Process._, vol. 63, no. 20, pp. 5464–5478, Oct. 2015.
 
-<p>3. The <a href="http://grouplens.org/datasets/movielens/100k/">MovieLens-100k</a> dataset. When using this dataset, please cite</p>
+<p>2. The <a href="http://grouplens.org/datasets/movielens/100k/">MovieLens-100k</a> dataset. When using this dataset, please cite</p>
 
 F. M. Harper and J. A. Konstan, "[The MovieLens datasets: History and Context](http://dl.acm.org/citation.cfm?id=2827872)", _ACM Trans. Interactive Intell. Syst._, vol. 5, no. 4, pp. 19:(1-19), Jan. 2016.
 
-<p>4. A source localization dataset. This source localization problem generates synthetic data at execution time. This data can be generated on synthetic graphs such as the <a href="http://www.nature.com/articles/30918">Small World</a> graph or the <a href="http://journals.aps.org/pre/abstract/10.1103/PhysRevE.84.066106">Stochastic Block Model</a>. It can also generate synthetic data, on a real <a href="http://snap.stanford.edu/data/ego-Facebook.html">Facebook graph</a>. When using the Facebook graph, please cite</p>
+<p>3. A source localization dataset. This source localization problem generates synthetic data at execution time. This data can be generated on synthetic graphs such as the <a href="http://www.nature.com/articles/30918">Small World</a> graph or the <a href="http://journals.aps.org/pre/abstract/10.1103/PhysRevE.84.066106">Stochastic Block Model</a>. It can also generate synthetic data, on a real <a href="http://snap.stanford.edu/data/ego-Facebook.html">Facebook graph</a>. When using the Facebook graph, please cite</p>
 
 J. McAuley and J. Leskovec, "[Learning to discover social circles in Ego networks](http://papers.nips.cc/paper/4532-learning-to-discover-social-circles-in-ego-networks)," in _26th Neural Inform. Process. Syst._ Stateline, TX: NeurIPS Foundation, 3-8 Dec. 2012.
 
@@ -65,6 +81,8 @@ J. McAuley and J. Leskovec, "[Learning to discover social circles in Ego network
 The libraries found here are split into two directories: <code>Modules/</code> and <code>Utils/</code>.
 
 * <code>Modules.architectures</code> contains the implementation of several standard architectures (as <code>nn.Module</code> subclasses) so that they can be readily initialized and trained. Details are provided in the [next section](#architectures).
+
+* <code>Modules.loss</code> contains a wrapper for the loss function so that it can adapt to multiple scenarios.
 
 * <code>Modules.model</code> defines a <code>Model</code> that binds together the three basic elements to construct a machine learning model: the (neural network) architecture, the loss function and the optimizer. It also contains assigns a name to the model and a directory where to save the trained parameters of the architecture. It offers methods to save and load parameters, and even to train and evaluate a model individually.
 
@@ -88,9 +106,7 @@ In what follows, we describe several ways of parameterizing the filters _H<sub>l
 
 F. Gama, A. G. Marques, G. Leus, and A. Ribeiro, "[Convolutional Neural Network Architectures for Signals Supported on Graphs](http://ieeexplore.ieee.org/document/8579589)," _IEEE Trans. Signal Process._, vol. 67, no. 4, pp. 1034–1049, Feb. 2019.
 
-The <code>Modules.architectures.SelectionGNN</code> also has a flag called <code>coarsening</code> that allows for the pooling to be done in terms of graph coarsening, following the Graclus algorithm. This part of the code was mainly adapted to PyTorch from <a href="http://github.com/mdeff/cnn_graph">this repository</a>. For more details on graph coarsening, and whenever using the <code>SelectionGNN</code> with graph coarsening pooling, please cite the following paper
-
-M. Defferrard, X. Bresson, and P. Vandergheynst, "[Convolutional Neural Networks on Graphs with Fast Localized Spectral Filtering](http://papers.nips.cc/paper/6081-convolutional-neural-networks-on-graphs-with-fast-localized-spectral-filtering.pdf),” in _30th Annu. Conf. Neural Inform. Process. Syst._ Barcelona, Spain: Neural Inform. Process. Foundation, 5-10 Dec. 2016, pp. 3844–3858.
+The <code>Modules.architectures.SelectionGNN</code> also has a flag called <code>coarsening</code> that allows for the pooling to be done in terms of graph coarsening, following the Graclus algorithm. This part of the code was mainly adapted to PyTorch from <a href="http://github.com/mdeff/cnn_graph">this repository</a>. For more details on graph coarsening, and whenever using the <code>SelectionGNN</code> with graph coarsening pooling, please cite the following [paper](http://papers.nips.cc/paper/6081-convolutional-neural-networks-on-graphs-with-fast-localized-spectral-filtering.pdf). Also note that by setting the number of filter taps (<code>nFilterTaps</code>) to <code>2</code> on every layer leads to this [architecture](http://openreview.net/forum?id=SJU4ayYgl). Finally, this other [architecture](https://openreview.net/forum?id=ryGs6iA5Km) is obtained by setting the number of filter taps to <code>1</code> for each number of designed fully-connected layers, and then setting it to <code>2</code> to complete the corresponding _GIN layer_. There is one further implementation that is entirely local (i.e. it only involves operations exchanging information with one-hop neighbors). This implementation essentially replaces the last fully-connected layer by a readout layer that only operates on the features obtained at the node. The implementation is dubbed <code>LocalGNN</code> and is used in the <code>MovieLens</code> example.
 
 * ___Convolutional Graph Neural Networks (via Spectrum)___. The spectral GNN is an early implementation of the convolutional GNN in the graph frequency domain. It does not scale to large graphs due to the cost of the eigendecomposition of the GSO. The spectral filtering layer is implemented as a <code>nn.Module</code> subclass in <code>Utils.graphML.SpectralGF</code> and the corresponding architecture with these linear layers, together with pointwise nonlinearities is implemented in <code>Modules.architectures.SpectralGNN</code>. For more details on the spectral graph filtering layer or its architecture, and whenever using it, please cite
 
@@ -112,11 +128,9 @@ E. Isufi, F. Gama, and A. Ribeiro, "[Generalizing Graph Convolutional Neural Net
 
 P. Veličković, G. Cucurull, A. Casanova, A. Romero, P. Liò, and Y. Bengio, "[Graph Attention Networks](http://openreview.net/forum?id=rJXMpikCZ)," in _6th Int. Conf. Learning Representations_. Vancouver, BC: Assoc. Comput. Linguistics, 30 Apr.-3 May 2018, pp. 1–12.
 
-* ___Local Activation Functions___. Besides all the different implementations of graph-based linear operations that have just been discussed, local activation functions are also implemented to use in the activation function operation within each layer. Local activation functions exploit the irregular neighborhoods that are inherent to arbitrary graphs. Instead of just applying a pointwise (node-wise) activation function, using a local activation function that carries out a nonlinear operation within a neighborhood has been shown to be effective as well. In particular, in this code, the __median activation function__ is implemented in <code>Utils.graphML.MedianLocalActivation</code> and the __max activation function__ is implemented in <code>Utils.graphML.MaxLocalActivation</code>. For more details on local activation function, and whenever using these operational layers, please cite the following papers
+* ___Local Activation Functions___. Local activation functions exploit the irregular neighborhoods that are inherent to arbitrary graphs. Instead of just applying a pointwise (node-wise) activation function, using a local activation function that carries out a nonlinear operation within a neighborhood has been shown to be effective as well. The corresponding architecture is named <code>LocalActivationGNN</code> and is available under <code>Modules/architectures.py</code>. In particular, in this code, the __median activation function__ is implemented in <code>Utils.graphML.MedianLocalActivation</code> and the __max activation function__ is implemented in <code>Utils.graphML.MaxLocalActivation</code>. For more details on local activation function, and whenever using these operational layers, please cite the following papers
 
-L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Invariance-Preserving Localized Activation Functions for Graph Neural Networks](http://arxiv.org/abs/1903.12575)," _arXiv:1903.12575v1 \[eess.SP\]_, 29 March 2019. \[Online\]. Available: http://arxiv.org/abs/1903.12575
-
-L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Median Activation Functions for Graph Neural Networks](http://ieeexplore.ieee.org/document/8683472)," in _44th IEEE Int. Conf. Acoust., Speech and Signal Process._ Brighton, UK: IEEE, 12-17 May 2019, pp. 7440–7447.
+L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Invariance-Preserving Localized Activation Functions for Graph Neural Networks](http://arxiv.org/abs/1903.12575)," _IEEE Trans. Signal Process._, 5 Nov. 2019, accepted for publication.
 
 ### Examples <a class="anchor" id="examples"/>
 
@@ -124,14 +138,14 @@ We have included an in-depth [tutorial](tutorial.ipynb) <code>tutorial.ipynb</co
 
 * [Tutorial](tutorial.ipynb): <code>tutorial.ipynb</code>. The tutorial covers the basic mathematical formulation for the graph neural networks, and considers a small synthetic problem of source localization. It implements the Aggregation and Selection GNN (both zero-padding and graph coarsening). This tutorial explain, in-depth, all the elements intervining in the setup, training and evaluation of the models, that serves as skeleton for all the other examples.
 
-* [Source Localization](sourceLocGNN.py): <code>sourceLocGNN.py</code>. This example deals with the source localization problem on a 40-node, 2-community random-generated SBM graph. It considers multiple graph and data realizations to account for randomness in data generation. The trained architectures in this example are the Edge-Variant, the Node-Variant and the GAT.
+* [Source Localization](sourceLocGNN.py): <code>sourceLocGNN.py</code>. This example deals with the source localization problem on a 100-node, 5-community random-generated SBM graph. It can consider multiple graph and data realizations to account for randomness in data generation. Implementations of Selection and Aggregation GNNs with different node sampling criteria are presented.
 
-* [MovieLens](movieGNN.py): <code>movieGNN.py</code>. This example has the objective of predicting the rating a given user would give to a movie, based on the movies it has ranked before (following the <a href="http://grouplens.org/datasets/movielens/100k/">MovieLens-100k</a> dataset). The Selection GNN, both with zero-padding and graph coarsening, are implemented.
+* [MovieLens](movieGNN.py): <code>movieGNN.py</code>. This example has the objective of predicting the rating some user would give to a movie, based on the movies it has ranked before (following the <a href="http://grouplens.org/datasets/movielens/100k/">MovieLens-100k</a> dataset). In this case we present a Selection GNN with no-padding and the local implementation available at <code>LocalGNN</code>.
 
-* [Authorship Attribution](authorshipGNN.py): <code>authorshipGNN.py</code>. This example addresses the problem of authorship attribution, by which a text has to be assigned to some author according to their styolemtric signature (based on the underlying word adjacency network; details <a href="http://ieeexplore.ieee.org/document/6638728">here</a>). In this case, we test the Aggregation GNN and the Multi-Node variant of the Aggregation GNN.
-
-* [20NEWS](20newsGNN.py): <code>20newsGNN.py</code>. The last example deals with the problem of text categorization in the 20NEWS dataset. The objective is to determine whether a given text belongs to one of 20 different categories, based on the word frequency (the words likeness is given by a <a href="http://papers.nips.cc/paper/5021-distributed-representations-of-words-and-phrases-and-their-compositionality.pdf">word2vec</a> embedding of the training set). In this last example, we test two Selection GNNs: one with graph coarsening and one with no pooling at all. 
+* [Authorship Attribution](authorshipGNN.py): <code>authorshipGNN.py</code>. This example addresses the problem of authorship attribution, by which a text has to be assigned to some author according to their styolemtric signature (based on the underlying word adjacency network; details <a href="http://ieeexplore.ieee.org/document/6638728">here</a>). In this case, we test different local activation functions.
 
 ## Version <a class="anchor" id="version"></a>
+
+* ___0.2 (Dec 16, 2019):___ Added new architecture: <code>LocalActivationGNN</code> and <code>LocalGNN</code>. Added new loss module to handle the logic that gives flexibility to the loss function. Moved the ordering from external to the architecture, to internal to it. Added two new methods: <code>.splitForward()</code> and <code>.changeGSO()</code> to separate the output from the graph layers and the MLP, and to change the GSO from training to test time, respectively. Class <code>Model</code> does not keep track of the order anymore. Got rid of <code>MATLAB(R)</code> support. Better memory management (do not move the entire dataset to memory, only the batch). Created methods to normalize dat aand change data type. Deleted the 20News dataset which is not supported anymore. Added the method <code>.expandDims()</code> to the <code>data</code> for increased flexibility. Changed the evaluate method so that it is always a decreasing function. Totally revamped the <code>MovieLens</code> class. Corrected a bug on the <code>computeNeighborhood()</code> function (thanks to Bianca Iancu, A (dot) Iancu-1 (at) student (dot) tudelft (dot) nl and Gabriele Mazzola, G (dot) Mazzola (at) student (dot) tudelft (dot) nl for spotting it). Corrected bugs on device handling of local activation functions. Updated tutorial.
 
 * ___0.1 (Jul 12, 2019):___ First released (beta) version of this graph neural network library. Includes the basic convolutional graph neural networks (selection -zero-padding and graph coarsening-, spectral, aggregation), and some non-convolutional graph neural networks as well (node-variant, edge-variant and graph attention networks). It also inlcudes local activation functions (max and median). In terms of examples, it considers the source localization problem (both in the tutorial and in a separate example), the movie recommendation problem, the authorship attribution problem and the text categorization problems. In terms of structure, it sets the basis for data handling and training of multiple models.
