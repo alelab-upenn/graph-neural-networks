@@ -9,6 +9,15 @@ adaptExtraDimensionLoss: wrapper that handles extra dimensions
 
 import torch.nn as nn
 
+# An arbitrary loss function handling penalties needs to have the following
+# conditions
+# .penaltyList attribute listing the names of the penalties
+# .nPenalties attibute is an int with the number of penalties
+# Forward function has to output the actual loss, the main loss (with no
+# penalties), and a dictionary with the value of each of the penalties.
+# This will be standard procedure for all loss functions that have penalties.
+# Note: The existence of a penalty will be signaled by an attribute in the model
+
 class adaptExtraDimensionLoss(nn.modules.loss._Loss):
     """
     adaptExtraDimensionLoss: wrapper that handles extra dimensions
