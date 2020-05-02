@@ -18,18 +18,19 @@ We note that some specific [architectures](#architectures) have specific paper c
 
 Other papers on GNNs by the authors are
 
-L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Invariance-Preserving Localized Activation Functions for Graph Neural Networks](http://arxiv.org/abs/1903.12575)," _IEEE Trans. Signal Process._, 5 Nov. 2019, accepted for publication.
+E. Isufi, F. Gama, and A. Ribeiro, "[EdgeNets: Edge Varying Graph Neural Networks](http://arxiv.org/abs/2001.07620)," submitted to _IEEE Trans. Pattern Analysis and Mach. Intell._
 
-L. Ruiz, F. Gama, and A. Ribeiro, "[Gated Graph Convolutional Recurrent Neural Networks](http://arxiv.org/abs/1903.01888)," in _27th Eur. Signal Process. Conf._ A Coruña, Spain: Eur. Assoc. Signal Process., 2-6 Sep. 2019.
+F. Gama, E. Isufi, G. Leus, and A. Ribeiro, "[Graphs, Convolutions, and Neural Networks](http://arxiv.org/abs/2003.03777)," submitted to _IEEE Signal Process. Mag._
 
-E. Isufi, F. Gama, and A. Ribeiro, "[Generalizing Graph Convolutional Neural Networks with Edge-Variant Recursions on Graphs](https://arxiv.org/abs/1903.01298)," in _27th Eur. Signal Process. Conf._ A Coruña, Spain: Eur. Assoc. Signal Process., 2-6 Sep. 2019.
+L. Ruiz, F. Gama, and A. Ribeiro, "[Gated Graph Recurrent Neural Networks](http://arxiv.org/abs/2002.01038)," submitted to _IEEE Trans. Signal Process._
 
-F. Gama, J. Bruna, and A. Ribeiro, "[Stability Properties of Graph Neural Networks](http://arxiv.org/abs/1905.04497),"
-arXiv:1905.04497v2, 4 Sep. 2019, submitted to _IEEE Trans. Signal Process._
+F. Gama, J. Bruna, and A. Ribeiro, "[Stability Properties of Graph Neural Networks](http://arxiv.org/abs/1905.04497)," submitted to _IEEE Trans. Signal Process._
+
+F. Gama, E. Tolstaya, and A. Ribeiro, "[Graph Neural Networks for Decentralized Controllers](http://arxiv.org/abs/2003.10280)," _arXiv:2003.10280v1 [cs.LG],_ 23 March 2020.
+
+L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Invariance-Preserving Localized Activation Functions for Graph Neural Networks](https://ieeexplore.ieee.org/document/8911416)," _IEEE Trans. Signal Process._, vol. 68, no. 1, pp. 127-141, Jan. 2020.
 
 F. Gama, J. Bruna, and A. Ribeiro, "[Stability of Graph Scattering Transforms](http://arxiv.org/abs/1906.04784)," in _33rd Conf. Neural Inform. Process. Syst._ Vancouver, BC: Neural Inform. Process. Syst. Foundation, 8-14 Dec. 2019.
-
-F. Gama, A. Ribeiro, and J. Bruna, "[Diffusion Scattering Transforms on Graphs](http://openreview.net/forum?id=BygqBiRcFQ)," in _7th Int. Conf. Learning Representations._ New Orleans, LA: Assoc. Comput. Linguistics, 6-9 May 2019, pp. 1–12.
 
 F. Gama, A. G. Marques, A. Ribeiro, and G. Leus, "[MIMO Graph Filters for Convolutional Networks](http://ieeexplore.ieee.org/document/8445934)," in _19th IEEE Int. Workshop Signal Process. Advances in Wireless Commun._ Kalamata, Greece: IEEE, 25-28 June 2018, pp. 1–5.
 
@@ -76,17 +77,25 @@ F. M. Harper and J. A. Konstan, "[The MovieLens datasets: History and Context](h
 
 J. McAuley and J. Leskovec, "[Learning to discover social circles in Ego networks](http://papers.nips.cc/paper/4532-learning-to-discover-social-circles-in-ego-networks)," in _26th Neural Inform. Process. Syst._ Stateline, TX: NeurIPS Foundation, 3-8 Dec. 2012.
 
+<p>4. A flocking dataset. The problem of flocking consists on controlling a robot swarm, initially flying at random, arbitrary velocities, to fly together at the same velocity while avoiding collisions with each other. The task is to do so in a distributed and decentralized manner, where each agent (each robot) can compute its control action at every time instat relying only on information obtained from communications with immediate neighbors. The dataset is synthetic in that it generates different sample trajectories with random initializations. When using this dataset, please cite
+
+F. Gama, E. Tolstaya, and A. Ribeiro, "[Graph Neural Networks for Decentralized Controllers](http://arxiv.org/abs/2003.10280)," _arXiv:2003.10280v1 [cs.LG],_ 23 March 2020.
+
 ### Libraries <a class="anchor" id="libraries"></a>
 
 The libraries found here are split into two directories: <code>Modules/</code> and <code>Utils/</code>.
 
 * <code>Modules.architectures</code> contains the implementation of several standard architectures (as <code>nn.Module</code> subclasses) so that they can be readily initialized and trained. Details are provided in the [next section](#architectures).
 
+* <code>Modules.architecturesTime</code> contains the implementation of several standard architectures (as <code>nn.Module</code> subclasses) that handle time-dependent topologies, so that they can be readily initialized and trained. Details are provided in the [next section](#architectures).
+
+* <code>Modules.evaluation</code> contains functions that act as intermediaries between the model and the data in order to evaluate a trained architecture.
+
 * <code>Modules.loss</code> contains a wrapper for the loss function so that it can adapt to multiple scenarios.
 
-* <code>Modules.model</code> defines a <code>Model</code> that binds together the three basic elements to construct a machine learning model: the (neural network) architecture, the loss function and the optimizer. It also contains assigns a name to the model and a directory where to save the trained parameters of the architecture. It offers methods to save and load parameters, and even to train and evaluate a model individually.
+* <code>Modules.model</code> defines a <code>Model</code> that binds together the three basic elements to construct a machine learning model: the (neural network) architecture, the loss function and the optimizer. Additionally, it assigns a training handler and an evaluator. It assigns a name to the model and a directory where to save the trained parameters of the architecture, as well. It is the basic class that can train and evaluate a model and also offers methods to save and load parameters.
 
-* <code>Modules.train</code> contains a function that handles the training for several models simulatenously, so that they can be compared under the exact same training conditions.
+* <code>Modules.training</code> contains classes that handle the training of each model, acting as an intermediary between the data and the specific architecture within the model being trained.
 
 * <code>Utils.dataTools</code> loads each of the datasets described [above](#datasets) as classes with several functionalities particular to each dataset. All the data classes do have two methods: <code>.getSamples</code> to gather the corresponding samples to training, validation or testing sets, and <code>.evaluate</code> that compute the corresponding evaluation measure.
 
@@ -118,11 +127,15 @@ F. Gama, A. G. Marques, G. Leus, and A. Ribeiro, "[Convolutional Neural Network 
 
 * ___Node-Variant Graph Neural Networks___. Parameterizing _H<sub>l</sub><sup>fg</sup>(S)_ with a node-variant graph filter (as opposed to a shift-invariant graph filter), a non-convolutional graph neural network architecture can be built. A node-variant graph filter, essentially lets each node learn its own weight for each neighborhood information. In order to allow this architecture to scale (so that the number of learnable parameters does not depend on the size of the graph), we offer a hybrid node-variant GNN approach as well. The graph filtering layer using node-variant graph filters is defined in <code>Utils.graphML.NodeVariantGF</code> and an example of an architecture using these filters for the linear operation, combined with pointwise activation functions and zero-padding pooling, is available in <code>Modules.architectures.NodeVariantGNN</code>. For more details on node-variant GNNs, and whenever using these filters or architecture, please cite the following paper
 
-F. Gama, A. G. Marques, G. Leus, and A. Ribeiro, "[Convolutional Neural Networks via Node-Varying Graph Filters](http://ieeexplore.ieee.org/document/8439899)," in _2018 IEEE Data Sci. Workshop_. Lausanne, Switzerland: IEEE, 4-6 June 2018, pp. 220-224.
+E. Isufi, F. Gama, and A. Ribeiro, "[EdgeNets: Edge Varying Graph Neural Networks](http://arxiv.org/abs/2001.07620)," submitted to _IEEE Trans. Pattern Analysis and Mach. Intell._
 
-* ___Edge-Variant Graph Neural Networks___. The most general parameterization that we can make of a linear operation that also takes into account the underlying graph support, is to let each node weigh each of their neighbors' information differently. This is achieved by means of an edge-variant graph filter. Certainly, the edge-variant graph filter has a number of parameters that scales with the number of edges, so a hybrid approach is available. The edge-variant graph filter layer cane be found in <code>Utils.graphML.EdgeVariantGF</code>. An example of an architecture with edge-variant graph filters as the linear layer, and pointwise activation functions and zero-padding pooling is available in <code>Modules.architectures.EdgeVariantGNN</code>. For more details on edge-variant GNNs, and whenever using these filters or architecture, please cite the following paper
+* ___ARMA Graph Neural Networks___. A convolutional architecture that is very flexible and with enlarged descriptive power. It replaces the graph convolution with a FIR filter (i.e. the use of a polynomial of the shift operator) by an ratio of polynomials. This architecture offers a good trade-off between number of paramters and selectivity of learnable filters. The edge-variant graph filter layer can be found in <code>Utils.graphML.EdgeVariantGF</code>. An example of an architecture with ARMA graph filters as the linear layer, and pointwise activation functions and zero-padding pooling is available in <code>Modules.architectures.ARMAfilterGNN</code>. A <code>Local</code> version of this architecture is also available. For more details on ARMA GNNs, and whenever using these filters or architecture, please cite the following paper
 
-E. Isufi, F. Gama, and A. Ribeiro, "[Generalizing Graph Convolutional Neural Networks with Edge-Variant Recursions on Graphs](http://arxiv.org/abs/1903.01298)," in _27th Eur. Signal Process. Conf._ A Coruña, Spain: EURASIP, 2-6 Sep. 2019.
+E. Isufi, F. Gama, and A. Ribeiro, "[EdgeNets: Edge Varying Graph Neural Networks](http://arxiv.org/abs/2001.07620)," submitted to _IEEE Trans. Pattern Analysis and Mach. Intell._
+
+* ___Edge-Variant Graph Neural Networks___. The most general parameterization that we can make of a linear operation that also takes into account the underlying graph support, is to let each node weigh each of their neighbors' information differently. This is achieved by means of an edge-variant graph filter. Certainly, the edge-variant graph filter has a number of parameters that scales with the number of edges, so a hybrid approach is available. The edge-variant graph filter layer can be found in <code>Utils.graphML.GraphFilterARMA</code>. An example of an architecture with edge-variant graph filters as the linear layer, and pointwise activation functions and zero-padding pooling is available in <code>Modules.architectures.EdgeVariantGNN</code>. A <code>Local</code> version of this architecture is also available. For more details on edge-variant GNNs, and whenever using these filters or architecture, please cite the following paper
+
+E. Isufi, F. Gama, and A. Ribeiro, "[EdgeNets: Edge Varying Graph Neural Networks](http://arxiv.org/abs/2001.07620)," submitted to _IEEE Trans. Pattern Analysis and Mach. Intell._
 
 * ___Graph Attention Networks___. A particular case of edge-variant graph filters (that predates the use of more general edge-variant filters) and that has been shown to be successful is the graph attention network (commonly known as GAT). The original implementation of GATs can be found in <a href="http://github.com/PetarV-/GAT">this repository</a>. In this library, we offer a PyTorch adaptation of this code (which was originally written for TensorFlow). The GAT parameterizes the edge-variant graph filter by taking into account both the graph support and the data, yielding an architecture with a number of parameters that is independent of the size of the graph. The graph attentional layer can be found in <code>Utils.graphML.GraphAttentional</code>, and an example of this architecture in <code>Modules.architectures.GraphAttentionNetwork</code>. For more details on GATs, and whenever using this code, please cite the following paper
 
@@ -130,21 +143,35 @@ P. Veličković, G. Cucurull, A. Casanova, A. Romero, P. Liò, and Y. Bengio, "[
 
 * ___Local Activation Functions___. Local activation functions exploit the irregular neighborhoods that are inherent to arbitrary graphs. Instead of just applying a pointwise (node-wise) activation function, using a local activation function that carries out a nonlinear operation within a neighborhood has been shown to be effective as well. The corresponding architecture is named <code>LocalActivationGNN</code> and is available under <code>Modules/architectures.py</code>. In particular, in this code, the __median activation function__ is implemented in <code>Utils.graphML.MedianLocalActivation</code> and the __max activation function__ is implemented in <code>Utils.graphML.MaxLocalActivation</code>. For more details on local activation function, and whenever using these operational layers, please cite the following papers
 
-L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Invariance-Preserving Localized Activation Functions for Graph Neural Networks](http://arxiv.org/abs/1903.12575)," _IEEE Trans. Signal Process._, 5 Nov. 2019, accepted for publication.
+L. Ruiz, F. Gama, A. G. Marques, and A. Ribeiro, "[Invariance-Preserving Localized Activation Functions for Graph Neural Networks](https://ieeexplore.ieee.org/document/8911416)," _IEEE Trans. Signal Process._, vol. 68, no. 1, pp. 127-141, Jan. 2020.
+
+* ___Time-Varying Architectures___. The Selection and Aggregation GNNs have a version adapted to handling time-varying graph signals as well as time-varying shift operators, acting with a unit-delay between communication with neighbors. These architectures can be found in <code>architecturesTime.LocalGNN_DB</code> and <code>architecturesTime.AggregationGNN_DB</code>. For more details on these architectures, please see (and if use, please cite)
+
+F. Gama, E. Tolstaya, and A. Ribeiro, "[Graph Neural Networks for Decentralized Controllers](http://arxiv.org/abs/2003.10280)," _arXiv:2003.10280v1 [cs.LG],_ 23 March 2020.
+
+E. Tolstaya, F. Gama, J. Paulos, G. Pappas, V. Kumar, and A. Ribeiro, "[Learning Decentralized COntrollers for Robot Swarms with Graph Neural Networks](http://arxiv.org/abs/1903.10527)," in _Conf. Robot Learning 2019._ Osaka, Japan: Int. Found. Robotics Res., 30 Oct.-1 Nov. 2019.
+
+* ___Graph Recurrent Neural Networks___. A graph RNN approximates a time-varying graph process with a hidden Markov model, where the hidden state is learned from data. In a graph RNN all linear transforms involved are graph filters that respect the graph. This is a highly flexible architecture that exploits the graph structure as well as the time-dependencies present in data. The architecture can be found in <code>architecturesTime.GraphRecurrentNN_DB</code>. For more details please see, and when using this architecture please cite,
+
+L. Ruiz, F. Gama, and A. Ribeiro, "[Gated Graph Recurrent Neural Networks](http://arxiv.org/abs/2002.01038)," submitted to _IEEE Trans. Signal Process._
 
 ### Examples <a class="anchor" id="examples"/>
 
 We have included an in-depth [tutorial](tutorial.ipynb) <code>tutorial.ipynb</code> on a [Jupyter Notebook](http://jupyter.org/). We have also included other examples involving all the four datasets presented [above](#datasets), with examples of all the architectures [just](#architectures) discussed.
 
-* [Tutorial](tutorial.ipynb): <code>tutorial.ipynb</code>. The tutorial covers the basic mathematical formulation for the graph neural networks, and considers a small synthetic problem of source localization. It implements the Aggregation and Selection GNN (both zero-padding and graph coarsening). This tutorial explain, in-depth, all the elements intervining in the setup, training and evaluation of the models, that serves as skeleton for all the other examples.
+* [Tutorial](tutorial.ipynb): <code>tutorial.ipynb</code>. The tutorial covers the basic mathematical formulation for the graph neural networks, and considers a small synthetic problem of source localization. It implements the Aggregation and Selection GNN (both zero-padding and graph coarsening). This tutorial explain, in-depth, all the elements intervening in the setup, training and evaluation of the models, that serves as skeleton for all the other examples.
 
 * [Source Localization](sourceLocGNN.py): <code>sourceLocGNN.py</code>. This example deals with the source localization problem on a 100-node, 5-community random-generated SBM graph. It can consider multiple graph and data realizations to account for randomness in data generation. Implementations of Selection and Aggregation GNNs with different node sampling criteria are presented.
 
-* [MovieLens](movieGNN.py): <code>movieGNN.py</code>. This example has the objective of predicting the rating some user would give to a movie, based on the movies it has ranked before (following the <a href="http://grouplens.org/datasets/movielens/100k/">MovieLens-100k</a> dataset). In this case we present a Selection GNN with no-padding and the local implementation available at <code>LocalGNN</code>.
+* [MovieLens](movieGNN.py): <code>movieGNN.py</code>. This example has the objective of predicting the rating some user would give to a movie, based on the movies it has ranked before (following the <a href="http://grouplens.org/datasets/movielens/100k/">MovieLens-100k</a> dataset). In this case we present a one- and two-layer Selection GNN with no-padding and the one- and two-layer local implementation available at <code>LocalGNN</code>.
 
-* [Authorship Attribution](authorshipGNN.py): <code>authorshipGNN.py</code>. This example addresses the problem of authorship attribution, by which a text has to be assigned to some author according to their styolemtric signature (based on the underlying word adjacency network; details <a href="http://ieeexplore.ieee.org/document/6638728">here</a>). In this case, we test different local activation functions.
+* [Authorship Attribution](authorshipGNN.py): <code>authorshipGNN.py</code>. This example addresses the problem of authorship attribution, by which a text has to be assigned to some author according to their styolmetric signature (based on the underlying word adjacency network; details <a href="http://ieeexplore.ieee.org/document/6638728">here</a>). In this case, we test different local activation functions (median, max, and pointwise).
+
+* [Flocking](flockingGNN.py): <code>flockingGNN.py</code>. This is an example of controlling a robot swarm to fly together at the same velocity while avoiding collisions. It is a synthetic dataset where time-dependent architectures can be tested. In particular, we test the use of a linear filter, a Local GNN, an Aggregation GNN and a GRNN, considering, not only samples of the form (S_t, x_t), for each t, but also delayed communications where the information observed from further away neighbors is actually delayed.
 
 ## Version <a class="anchor" id="version"></a>
+
+* ___0.3 (May 2, 2020):___ Added the time-dependent architectures that handle (graph, graph signal) batch data as well as delayed communications. These architectures can be found in <code>architecturesTime.py</code>. A new synthetic dataset has also been added, namely, that used in the Flocking problem. Made the <code>Model</code> class to be the central handler of all the machine learning model. Training multiple models has been dropped in favor of training through the method offered in the <code>Model</code> class. Trainers and evaluators had to been added to be effective intermediaries between the architectures and the data, especially in problems that are not classification ones (i.e. regression -interpolation- in the movie recommendation setting, and imitation learning in the flocking problem). This should give flexibility to carry over these architectures to new problems, as well as make prototyping easier since training and evaluating has been greatly simplified. Minor modifications and eventual bug fixes have been made here and there.
 
 * ___0.2 (Dec 16, 2019):___ Added new architecture: <code>LocalActivationGNN</code> and <code>LocalGNN</code>. Added new loss module to handle the logic that gives flexibility to the loss function. Moved the ordering from external to the architecture, to internal to it. Added two new methods: <code>.splitForward()</code> and <code>.changeGSO()</code> to separate the output from the graph layers and the MLP, and to change the GSO from training to test time, respectively. Class <code>Model</code> does not keep track of the order anymore. Got rid of <code>MATLAB(R)</code> support. Better memory management (do not move the entire dataset to memory, only the batch). Created methods to normalize dat aand change data type. Deleted the 20News dataset which is not supported anymore. Added the method <code>.expandDims()</code> to the <code>data</code> for increased flexibility. Changed the evaluate method so that it is always a decreasing function. Totally revamped the <code>MovieLens</code> class. Corrected a bug on the <code>computeNeighborhood()</code> function (thanks to Bianca Iancu, A (dot) Iancu-1 (at) student (dot) tudelft (dot) nl and Gabriele Mazzola, G (dot) Mazzola (at) student (dot) tudelft (dot) nl for spotting it). Corrected bugs on device handling of local activation functions. Updated tutorial.
 
