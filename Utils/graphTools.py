@@ -6,6 +6,8 @@ graphTools.py Tools for handling graphs
 
 Functions:
 
+plotGraph: plots a graph from an adjacency matrix
+printGraph: prints (saves) a graph from an adjacency matrix
 adjacencyToLaplacian: transform an adjacency matrix into a Laplacian matrix
 normalizeAdjacency: compute the normalized adjacency
 normalizeLaplacian: compute the normalized Laplacian
@@ -34,12 +36,169 @@ import scipy.sparse
 import scipy.spatial as sp
 from sklearn.cluster import SpectralClustering
 
+import os
+import matplotlib
+matplotlib.rcParams['text.usetex'] = True
+matplotlib.rcParams['font.family'] = 'serif'
+import matplotlib.pyplot as plt
+
 zeroTolerance = 1e-9 # Values below this number are considered zero.
 
 # If adjacency matrices are not symmetric these functions might not work as
 # desired: the degree will be the in-degree to each node, and the Laplacian
 # is not defined for directed graphs. Same caution is advised when using
 # graphs with self-loops.
+
+def plotGraph(adjacencyMatrix, **kwargs):
+    """
+    plotGraph(A): plots a graph from adjacency matrix A of size N x N
+    
+    Optional keyword arguments:
+        'positions' (np.array, default: points in a circle of radius 1):
+                size N x 2 of positions for each node
+        'figSize' (int, default: 5): size of the figure
+        'linewidth' (int, default: 1): edge width
+        'markerSize' (int, default: 15): node size
+        'markerShape' (string, default: 'o'): node shape
+        'color' (hex code string, default: '#01256E'): color of the nodes
+        'nodeLabel' (list, default: None): list of length N where each element
+            corresponds to the label of each node
+    """
+    
+    # Data
+    #   Adjacency matrix
+    W = adjacencyMatrix
+    assert W.shape[0] == W.shape[1]
+    N = W.shape[0]
+    #   Positions (optional)
+    if 'positions' in kwargs.keys():
+        pos = kwargs['positions']
+    else:
+        angle = np.linspace(0, 2*np.pi*(1-1/N), num = N)
+        radius = 1
+        pos = np.array([
+                radius * np.sin(angle),
+                radius * np.cos(angle)
+                ])
+        
+    # Create figure
+    #   Figure size
+    if 'figSize' in kwargs.keys():
+        figSize = kwargs['figSize']
+    else:
+        figSize = 5
+    #   Line width
+    if 'lineWidth' in kwargs.keys():
+        lineWidth = kwargs['lineWidth']
+    else:
+        lineWidth = 1
+    #   Marker Size
+    if 'markerSize' in kwargs.keys():
+        markerSize = kwargs['markerSize']
+    else:
+        markerSize = 15
+    #   Marker shape
+    if 'markerShape' in kwargs.keys():
+        markerShape = kwargs['markerShape']
+    else:
+        markerShape = 'o'
+    #   Marker color
+    if 'color' in kwargs.keys():
+        markerColor = kwargs['color']
+    else:
+        markerColor = '#01256E'
+    #   Node labeling
+    if 'nodeLabel' in kwargs.keys():
+        doText = True
+        nodeLabel = kwargs['nodeLabel']
+        assert len(nodeLabel) == N
+    else:
+        doText = False
+        
+    # Plot
+    figGraph = plt.figure(figsize = (1*figSize, 1*figSize))
+    for i in range(N):
+        for j in range(N):
+            if W[i,j] > 0:
+                plt.plot([pos[0,i], pos[0,j]], [pos[1,i], pos[1,j]],
+                         linewidth = W[i,j] * lineWidth,
+                         color = '#A8AAAF')
+    for i in range(N):
+        plt.plot(pos[0,i], pos[1,i], color = markerColor,
+                 marker = markerShape, markerSize = markerSize)
+        if doText:
+            plt.text(pos[0,i], pos[1,i], nodeLabel[i],
+                     verticalalignment = 'center',
+                     horizontalalignment = 'center',
+                     color = '#F2F2F3')
+            
+    return figGraph
+
+def printGraph(adjacencyMatrix, **kwargs):
+    """
+    printGraph(A): Wrapper for plot graph to directly save it as a graph (with 
+        no axis, nor anything else like that, more aesthetic, less changes)
+    
+    Optional keyword arguments:
+        'saveDir' (os.path, default: '.'): directory where to save the graph
+        'legend' (default: None): Text for a legend
+        'xLabel' (str, default: None): Text for the x axis
+        'yLabel' (str, default: None): Text for the y axis
+        'graphName' (str, default: 'graph'): name to save the file
+        'positions' (np.array, default: points in a circle of radius 1):
+                size N x 2 of positions for each node
+        'figSize' (int, default: 5): size of the figure
+        'linewidth' (int, default: 1): edge width
+        'markerSize' (int, default: 15): node size
+        'markerShape' (string, default: 'o'): node shape
+        'color' (hex code string, default: '#01256E'): color of the nodes
+        'nodeLabel' (list, default: None): list of length N where each element
+            corresponds to the label of each node
+    """
+    
+    # Wrapper for plot graph to directly save it as a graph (with no axis,
+    # nor anything else like that, more aesthetic, less changes)
+    
+    W = adjacencyMatrix
+    assert W.shape[0] == W.shape[1]
+    
+    # Printing options
+    if 'saveDir' in kwargs.keys():
+        saveDir = kwargs['saveDir']
+    else:
+        saveDir = '.'
+    if 'legend' in kwargs.keys():
+        doLegend = True
+        legendText = kwargs['legend']
+    else:
+        doLegend = False
+    if 'xLabel' in kwargs.keys():
+        doXlabel = True
+        xLabelText = kwargs['xLabel']
+    else:
+        doXlabel = False
+    if 'yLabel' in kwargs.keys():
+        doYlabel = True
+        yLabelText = kwargs['yLabel']
+    else:
+        doYlabel = False
+    if 'graphName' in kwargs.keys():
+        graphName = kwargs['graphName']
+    else:
+        graphName = 'graph'
+    
+    figGraph = plotGraph(adjacencyMatrix, **kwargs)
+    
+    plt.axis('off')
+    if doXlabel:
+        plt.xlabel(xLabelText)
+    if doYlabel:
+        plt.yLabel(yLabelText)
+    if doLegend:
+        plt.legend(legendText)
+    
+    figGraph.savefig(os.path.join(saveDir, '%s.pdf' % graphName),
+                     bbox_inches = 'tight', transparent = True)
 
 def adjacencyToLaplacian(W):
     """
