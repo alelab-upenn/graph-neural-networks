@@ -2,27 +2,22 @@
 # Fernando Gama, fgama@seas.upenn.edu
 # Luana Ruiz, rubruiz@seas.upenn.edu
 
-# In this code, we simulate the source localization problem
+# Simulate the source localization problem. We have a graph, and we observe a
+# signal defined on top of this graph. This signal is assumed to represent the
+# diffusion of a rumor. The rumor is observed after being diffused for an
+# unknown amount of time. The objective is to determine which is the node (or 
+# the community) that started the rumor.
 
-# When it runs, it produces the following output:
-#   - It trains the specified models and saves the best and the last model
-#       parameters of each realization on a directory named 'savedModels'.
-#   - It saves a pickle file with the torch random state and the numpy random
-#       state for reproducibility.
-#   - It saves a text file 'hyperparameters.txt' containing the specific
-#       (hyper)parameters that control the run, together with the main (scalar)
-#       results obtained.
-#   - If desired, logs in tensorboardX the training loss and evaluation measure
-#       both of the training set and the validation set. These tensorboardX logs
-#       are saved in a logsTB directory.
-#   - If desired, saves the vector variables of each realization (training and
-#       validation loss and evaluation measure, respectively); this is saved
-#       in pickle format. These variables are saved in a trainVars directory.
-#   - If desired, plots the training and validation loss and evaluation
-#       performance for each of the models, together with the training loss and
-#       validation evaluation performance for all models. The summarizing
-#       variables used to construct the plots are also saved in pickle format. 
-#       These plots (and variables) are in a figs directory.
+# Outputs:
+# - Text file with all the hyperparameters selected for the run and the 
+#   corresponding results (hyperparameters.txt)
+# - Pickle file with the random seeds of both torch and numpy for accurate
+#   reproduction of results (randomSeedUsed.pkl)
+# - The parameters of the trained models, for both the Best and the Last
+#   instance of each model (savedModels/)
+# - The figures of loss and evaluation through the training iterations for
+#   each model (figs/ and trainVars/)
+# - If selected, logs in tensorboardX certain useful training variables
 
 #%%##################################################################
 #                                                                   #
@@ -36,6 +31,7 @@ import numpy as np
 import matplotlib
 matplotlib.rcParams['text.usetex'] = True
 matplotlib.rcParams['font.family'] = 'serif'
+matplotlib.rcParams['text.latex.preamble']=[r'\usepackage{amsmath}']
 import matplotlib.pyplot as plt
 import pickle
 import datetime
@@ -51,12 +47,16 @@ import Utils.dataTools
 import Utils.graphML as gml
 import Modules.architectures as archit
 import Modules.model as model
-import Modules.train as train
+import Modules.training as training
+import Modules.evaluation as evaluation
 import Modules.loss as loss
 
 #\\\ Separate functions:
 from Utils.miscTools import writeVarValues
 from Utils.miscTools import saveSeed
+
+# Start measuring time
+startRunTime = datetime.datetime.now()
 
 #%%##################################################################
 #                                                                   #
@@ -118,8 +118,8 @@ nValid = int(0.025 * nTrain) # Number of validation samples
 nTest = 200 # Number of testing samples
 tMax = 25 # Maximum number of diffusion times (A^t for t < tMax)
 
-nDataRealizations = 1 # Number of data realizations
-nGraphRealizations = 1 # Number of graph realizations
+nDataRealizations = 10 # Number of data realizations
+nGraphRealizations = 10 # Number of graph realizations
 nClasses = 5 # Number of source nodes to select
 
 nNodes = 100 # Number of nodes
@@ -144,7 +144,7 @@ elif graphType == 'FacebookEgo':
 #\\\ Save values:
 writeVarValues(varsFile, {'nNodes': nNodes, 'graphType': graphType})
 writeVarValues(varsFile, graphOptions)
-writeVarValues(varsFile, {'nTrain': nTest,
+writeVarValues(varsFile, {'nTrain': nTrain,
                           'nValid': nValid,
                           'nTest': nTest,
                           'tMax': tMax,
@@ -158,7 +158,7 @@ writeVarValues(varsFile, {'nTrain': nTest,
 ############
 
 #\\\ Individual model training options
-trainer = 'ADAM' # Options: 'SGD', 'ADAM', 'RMSprop'
+optimAlg = 'ADAM' # Options: 'SGD', 'ADAM', 'RMSprop'
 learningRate = 0.001 # In all options
 beta1 = 0.9 # beta1 if 'ADAM', alpha if 'RMSprop'
 beta2 = 0.999 # ADAM option only
@@ -177,7 +177,7 @@ validationInterval = 20 # How many training steps to do the validation
 
 #\\\ Save values
 writeVarValues(varsFile,
-               {'trainer': trainer,
+               {'optimAlg': optimAlg,
                 'learningRate': learningRate,
                 'beta1': beta1,
                 'lossFunction': lossFunction,
@@ -207,10 +207,17 @@ doAggregationGNN = True
 
 # In this section, we determine the (hyper)parameters of models that we are
 # going to train. This only sets the parameters. The architectures need to be
-# created later below. That is, any new architecture in this part, needs also
-# to be coded later on. This is just to be easy to change the parameters once
-# the architecture is created. Do not forget to add the name of the architecture
+# created later below. Do not forget to add the name of the architecture
 # to modelList.
+
+# If the model dictionary is called 'model' + name, then it can be
+# picked up immediately later on, and there's no need to recode anything after
+# the section 'Setup' (except for setting the number of nodes in the 'N' 
+# variable after it has been coded).
+
+# The name of the keys in the model dictionary have to be the same
+# as the names of the variables in the architecture call, because they will
+# be called by unpacking the dictionary.
 
 modelList = []
 
@@ -218,37 +225,47 @@ modelList = []
 #\\\ SELECTION GNN \\\
 #\\\\\\\\\\\\\\\\\\\\\
 
-# Obs.: The name of the model has to be whatever comes after hParams in the
-# hyperparameter dictionary name.
-
 # Hyperparameters to be shared by all Selection GNN architectures
 
 if doSelectionGNN:
     
-    hParamsSelGNN = {}
+    #\\\ Basic parameters for all the Selection GNN architectures
     
-    hParamsSelGNN['name'] = 'SelGNN' # To be modified later on depending on the
+    modelSelGNN = {}
+    modelSelGNN['name'] = 'SelGNN' # To be modified later on depending on the
         # specific ordering selected
+    modelSelGNN['device'] = 'cuda:0' if (useGPU and torch.cuda.is_available()) \
+                                     else 'cpu'
+                                     
+    #\\\ ARCHITECTURE
+        
     # Select architectural nn.Module to use
-    hParamsSelGNN['archit'] = archit.SelectionGNN
-    
+    modelSelGNN['archit'] = archit.SelectionGNN
     # Graph convolutional layers
-    hParamsSelGNN['dimNodeSignals'] = [1, 32, 32] # Number of features per layer
-    hParamsSelGNN['nFilterTaps'] = [5, 5] # Number of filter taps
-    hParamsSelGNN['bias'] = True # Include bias
+    modelSelGNN['dimNodeSignals'] = [1, 32, 32] # Number of features per layer
+    modelSelGNN['nFilterTaps'] = [5, 5] # Number of filter taps
+    modelSelGNN['bias'] = True # Include bias
     # Nonlinearity
-    hParamsSelGNN['nonlinearity'] = nn.ReLU
+    modelSelGNN['nonlinearity'] = nn.ReLU
     # Pooling
-    hParamsSelGNN['nSelectedNodes'] = [10, 10] # Number of nodes to keep
-    hParamsSelGNN['poolingFunction'] = gml.MaxPoolLocal # Summarizing function
-    hParamsSelGNN['poolingSize'] = [6, 8] # Summarizing neighborhoods
+    modelSelGNN['nSelectedNodes'] = [10, 10] # Number of nodes to keep
+    modelSelGNN['poolingFunction'] = gml.MaxPoolLocal # Summarizing function
+    modelSelGNN['poolingSize'] = [6, 8] # Summarizing neighborhoods
     # Readout layer
-    hParamsSelGNN['dimLayersMLP'] = [nClasses]
+    modelSelGNN['dimLayersMLP'] = [nClasses]
     # Graph Structure
-    hParamsSelGNN['GSO'] = None # To be determined later on, based on data
-    hParamsSelGNN['order'] = None # To be determined next
+    modelSelGNN['GSO'] = None # To be determined later on, based on data
+    modelSelGNN['order'] = None # To be determined next
     # Coarsening
-    hParamsSelGNN['coarsening'] = False
+    modelSelGNN['coarsening'] = False
+    
+    #\\\ TRAINER
+
+    modelSelGNN['trainer'] = training.Trainer
+    
+    #\\\ EVALUATOR
+    
+    modelSelGNN['evaluator'] = evaluation.evaluate
 
 #\\\\\\\\\\\\
 #\\\ MODEL 1: Selection GNN with nodes ordered by degree
@@ -256,15 +273,15 @@ if doSelectionGNN:
 
 if doSelectionGNN and doDegree:
 
-    hParamsSelGNNdeg = deepcopy(hParamsSelGNN)
+    modelSelGNNdeg = deepcopy(modelSelGNN)
 
-    hParamsSelGNNdeg['name'] += 'deg' # Name of the architecture
+    modelSelGNNdeg['name'] += 'deg' # Name of the architecture
     # Structure
-    hParamsSelGNNdeg['order'] = 'Degree'
+    modelSelGNNdeg['order'] = 'Degree'
     
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNdeg)
-    modelList += [hParamsSelGNNdeg['name']]
+    writeVarValues(varsFile, modelSelGNNdeg)
+    modelList += [modelSelGNNdeg['name']]
     
 #\\\\\\\\\\\\
 #\\\ MODEL 2: Selection GNN with nodes ordered by EDS
@@ -272,15 +289,15 @@ if doSelectionGNN and doDegree:
 
 if doSelectionGNN and doEDS:
 
-    hParamsSelGNNeds = deepcopy(hParamsSelGNN)
+    modelSelGNNeds = deepcopy(modelSelGNN)
 
-    hParamsSelGNNeds['name'] += 'eds' # Name of the architecture
+    modelSelGNNeds['name'] += 'eds' # Name of the architecture
     # Structure
-    hParamsSelGNNeds['order'] = 'EDS'
-
+    modelSelGNNeds['order'] = 'EDS'
+    
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNeds)
-    modelList += [hParamsSelGNNeds['name']]
+    writeVarValues(varsFile, modelSelGNNeds)
+    modelList += [modelSelGNNeds['name']]
     
 #\\\\\\\\\\\\
 #\\\ MODEL 3: Selection GNN with nodes ordered by spectral proxies
@@ -288,15 +305,15 @@ if doSelectionGNN and doEDS:
 
 if doSelectionGNN and doSpectralProxies:
 
-    hParamsSelGNNspr = deepcopy(hParamsSelGNN)
+    modelSelGNNspr = deepcopy(modelSelGNN)
 
-    hParamsSelGNNspr['name'] += 'spr' # Name of the architecture
+    modelSelGNNspr['name'] += 'spr' # Name of the architecture
     # Structure
-    hParamsSelGNNspr['order'] = 'SpectralProxies'
-
+    modelSelGNNspr['order'] = 'SpectralProxies'
+    
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNspr)
-    modelList += [hParamsSelGNNspr['name']]
+    writeVarValues(varsFile, modelSelGNNspr)
+    modelList += [modelSelGNNspr['name']]
     
 #\\\\\\\\\\\\
 #\\\ MODEL 4: Selection GNN with graph coarsening
@@ -304,52 +321,64 @@ if doSelectionGNN and doSpectralProxies:
 
 if doSelectionGNN and doCoarsening:
 
-    hParamsSelGNNcrs = deepcopy(hParamsSelGNN)
+    modelSelGNNcrs = deepcopy(modelSelGNN)
 
-    hParamsSelGNNcrs['name'] += 'crs' # Name of the architecture
-    hParamsSelGNNcrs['poolingFunction'] = nn.MaxPool1d
-    hParamsSelGNNcrs['poolingSize'] = [2, 2]
-    hParamsSelGNNcrs['coarsening'] = True
+    modelSelGNNcrs['name'] += 'crs' # Name of the architecture
+    modelSelGNNcrs['poolingFunction'] = nn.MaxPool1d
+    modelSelGNNcrs['poolingSize'] = [2, 2]
+    modelSelGNNcrs['coarsening'] = True
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNNcrs)
-    modelList += [hParamsSelGNNcrs['name']]
+    writeVarValues(varsFile, modelSelGNNcrs)
+    modelList += [modelSelGNNcrs['name']]
     
 #\\\\\\\\\\\\\\\\\\\\\\\
 #\\\ AGGREGATION GNN \\\
 #\\\\\\\\\\\\\\\\\\\\\\\
 
-# Hyperparameters to be shared by all Selection GNN architectures
-
 if doAggregationGNN:
     
-    hParamsAggGNN = {}
+    #\\\ Basic parameters for all the Aggregation GNN architectures
     
-    hParamsAggGNN['name'] = 'AggGNN' # To be modified later on depending on the
+    modelAggGNN = {}
+    
+    modelAggGNN['name'] = 'AggGNN' # To be modified later on depending on the
         # specific ordering selected
-    # Select architectural nn.Module to use
-    hParamsAggGNN['archit'] = archit.AggregationGNN
+    modelAggGNN['device'] = 'cuda:0' if (useGPU and torch.cuda.is_available()) \
+                                     else 'cpu'
     
+    #\\\ ARCHITECTURE
+    
+    # Select architectural nn.Module to use
+    modelAggGNN['archit'] = archit.AggregationGNN
     # Convolutional layers
-    hParamsAggGNN['dimFeatures'] = [1, 16, 32] # Number of features per layer
-    hParamsAggGNN['nFilterTaps'] = [4, 8] # Number of filter taps
-    hParamsAggGNN['bias'] = True # Include bias
+    modelAggGNN['dimFeatures'] = [1, 16, 32] # Number of features per layer
+    modelAggGNN['nFilterTaps'] = [4, 8] # Number of filter taps
+    modelAggGNN['bias'] = True # Include bias
     # Nonlinearity
-    hParamsAggGNN['nonlinearity'] = nn.ReLU
+    modelAggGNN['nonlinearity'] = nn.ReLU
     # Pooling
-    hParamsAggGNN['poolingFunction'] = nn.MaxPool1d # Summarizing function
-    hParamsAggGNN['poolingSize'] = [2, 2] # Summarizing neighborhoods
+    modelAggGNN['poolingFunction'] = nn.MaxPool1d # Summarizing function
+    modelAggGNN['poolingSize'] = [2, 2] # Summarizing neighborhoods
     # Readout layer
-    hParamsAggGNN['dimLayersMLP'] = [nClasses]
+    modelAggGNN['dimLayersMLP'] = [nClasses]
     # Graph structure
-    hParamsAggGNN['GSO'] = None # To be determined later on, based on data
-    hParamsAggGNN['order'] = None # To be determined next
+    modelAggGNN['GSO'] = None # To be determined later on, based on data
+    modelAggGNN['order'] = None # To be determined next
     # Aggregation sequence
-    hParamsAggGNN['maxN'] = None # Maximum number of exchanges
-    hParamsAggGNN['nNodes'] = 1 # Number of nodes on which to obtain the 
+    modelAggGNN['maxN'] = None # Maximum number of exchanges
+    modelAggGNN['nNodes'] = 1 # Number of nodes on which to obtain the 
         # aggregation sequence
-    hParamsAggGNN['dimLayersAggMLP'] = [] # If more than one has been used, then
+    modelAggGNN['dimLayersAggMLP'] = [] # If more than one has been used, then
         # this MLP mixes together the features learned at all the selected nodes
+        
+    #\\\ TRAINER
+
+    modelAggGNN['trainer'] = training.Trainer
+    
+    #\\\ EVALUATOR
+    
+    modelAggGNN['evaluator'] = evaluation.evaluate
         
 #\\\\\\\\\\\\
 #\\\ MODEL 5: Aggregation GNN with node selected by degree
@@ -357,15 +386,15 @@ if doAggregationGNN:
 
 if doAggregationGNN and doDegree:
 
-    hParamsAggGNNdeg = deepcopy(hParamsAggGNN)
+    modelAggGNNdeg = deepcopy(modelAggGNN)
 
-    hParamsAggGNNdeg['name'] += 'deg' # Name of the architecture
+    modelAggGNNdeg['name'] += 'deg' # Name of the architecture
     # Structure
-    hParamsAggGNNdeg['order'] = 'Degree'
+    modelAggGNNdeg['order'] = 'Degree'
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsAggGNNdeg)
-    modelList += [hParamsAggGNNdeg['name']]
+    writeVarValues(varsFile, modelAggGNNdeg)
+    modelList += [modelAggGNNdeg['name']]
     
 #\\\\\\\\\\\\
 #\\\ MODEL 6: Aggregation GNN with node selected by EDS
@@ -373,15 +402,15 @@ if doAggregationGNN and doDegree:
 
 if doAggregationGNN and doEDS:
 
-    hParamsAggGNNeds = deepcopy(hParamsAggGNN)
+    modelAggGNNeds = deepcopy(modelAggGNN)
 
-    hParamsAggGNNeds['name'] += 'eds' # Name of the architecture
+    modelAggGNNeds['name'] += 'eds' # Name of the architecture
     # Structure
-    hParamsAggGNNeds['order'] = 'EDS'
+    modelAggGNNeds['order'] = 'EDS'
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsAggGNNeds)
-    modelList += [hParamsAggGNNeds['name']]
+    writeVarValues(varsFile, modelAggGNNeds)
+    modelList += [modelAggGNNeds['name']]
     
 #\\\\\\\\\\\\
 #\\\ MODEL 7: Aggregation GNN with node selected by spectral proxies
@@ -389,15 +418,15 @@ if doAggregationGNN and doEDS:
 
 if doAggregationGNN and doSpectralProxies:
 
-    hParamsAggGNNspr = deepcopy(hParamsAggGNN)
+    modelAggGNNspr = deepcopy(modelAggGNN)
 
-    hParamsAggGNNspr['name'] += 'spr' # Name of the architecture
+    modelAggGNNspr['name'] += 'spr' # Name of the architecture
     # Structure
-    hParamsAggGNNspr['order'] = 'SpectralProxies'
+    modelAggGNNspr['order'] = 'SpectralProxies'
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsAggGNNspr)
-    modelList += [hParamsAggGNNspr['name']]
+    writeVarValues(varsFile, modelAggGNNspr)
+    modelList += [modelAggGNNspr['name']]
 
 ###########
 # LOGGING #
@@ -440,34 +469,51 @@ writeVarValues(varsFile,
 
 #\\\ Determine processing unit:
 if useGPU and torch.cuda.is_available():
-    device = 'cuda'
     torch.cuda.empty_cache()
-else:
-    device = 'cpu'
-# Notify:
+
+#\\\ Notify of processing units
 if doPrint:
-    print("Device selected: %s" % device)
+    print("Selected devices:")
+    for thisModel in modelList:
+        modelDict = eval('model' + thisModel)
+        print("\t%s: %s" % (thisModel, modelDict['device']))
 
 #\\\ Logging options
 if doLogging:
     from Utils.visualTools import Visualizer
     logsTB = os.path.join(saveDir, 'logsTB')
     logger = Visualizer(logsTB, name='visualResults')
-
+    
 #\\\ Save variables during evaluation.
-# We will save all the evaluations obtained for each for the trained models.
-# It basically is a dictionary, containing a list of lists. The key of the
-# dictionary determines de the model, then the first list index determines
-# which graph, and the second list index, determines which realization within
-# that graph. Then, this will be converted to numpy to compute mean and standard
-# deviation (across the graph dimension).
-accBest = {} # Accuracy for the best model
-accLast = {} # Accuracy for the last model
-for thisModel in modelList: # Create an element for each graph realization,
-    # each of these elements will later be another list for each realization.
-    # That second list is created empty and just appends the results.
-    accBest[thisModel] = [None] * nGraphRealizations
-    accLast[thisModel] = [None] * nGraphRealizations
+# We will save all the evaluations obtained for each of the trained models.
+# It basically is a dictionary, containing a list. The key of the
+# dictionary determines the model, then the first list index determines
+# which split realization. Then, this will be converted to numpy to compute
+# mean and standard deviation (across the split dimension).
+costBest = {} # Cost for the best model (Evaluation cost: Error rate)
+costLast = {} # Cost for the last model
+for thisModel in modelList: # Create an element for each split realization,
+    costBest[thisModel] = [None] * nGraphRealizations
+    costLast[thisModel] = [None] * nGraphRealizations
+
+if doFigs:
+    #\\\ SAVE SPACE:
+    # Create the variables to save all the realizations. This is, again, a
+    # dictionary, where each key represents a model, and each model is a list
+    # for each data split.
+    # Each data split, in this case, is not a scalar, but a vector of
+    # length the number of training steps (or of validation steps)
+    lossTrain = {}
+    costTrain = {}
+    lossValid = {}
+    costValid = {}
+    # Initialize the splits dimension
+    for thisModel in modelList:
+        lossTrain[thisModel] = [None] * nGraphRealizations
+        costTrain[thisModel] = [None] * nGraphRealizations
+        lossValid[thisModel] = [None] * nGraphRealizations
+        costValid[thisModel] = [None] * nGraphRealizations
+
 
 ####################
 # TRAINING OPTIONS #
@@ -490,6 +536,11 @@ if doLearningRateDecay:
     trainingOptions['learningRateDecayRate'] = learningRateDecayRate
     trainingOptions['learningRateDecayPeriod'] = learningRateDecayPeriod
 trainingOptions['validationInterval'] = validationInterval
+
+# And in case each model has specific training options, then we create a 
+# separate dictionary per model.
+
+trainingOptsPerModel= {}
 
 #%%##################################################################
 #                                                                   #
@@ -572,8 +623,13 @@ for graph in range(nGraphRealizations):
     # Now, for each graph, we have multiple data realization, so we want, for
     # each graph, to create a list to hold each of those values
     for thisModel in modelList:
-        accBest[thisModel][graph] = []
-        accLast[thisModel][graph] = []
+        costBest[thisModel][graph] = []
+        costLast[thisModel][graph] = []
+        
+        lossTrain[thisModel][graph] = []
+        costTrain[thisModel][graph] = []
+        lossValid[thisModel][graph] = []
+        costValid[thisModel][graph] = []       
 
     #%%##################################################################
     #                                                                   #
@@ -622,18 +678,21 @@ for graph in range(nGraphRealizations):
                                                   sourceNodes, tMax = tMax)
         data.astype(torch.float64)
         #data.to(device)
-        data.expandDims()
+        data.expandDims() # Data are just graph signals, but the architectures 
+            # require that the input signals are of the form B x F x N, so we
+            # need to expand the middle dimensions to convert them from B x N 
+            # to B x 1 x N
 
         #%%##################################################################
         #                                                                   #
         #                    MODELS INITIALIZATION                          #
         #                                                                   #
         #####################################################################
-
+        
         # This is the dictionary where we store the models (in a model.Model
         # class, that is then passed to training).
         modelsGNN = {}
-
+    
         # If a new model is to be created, it should be called for here.
         
         if doPrint:
@@ -641,11 +700,21 @@ for graph in range(nGraphRealizations):
             
         for thisModel in modelList:
             
-            hParamsDict = deepcopy(eval('hParams' + thisModel))
+            # Get the corresponding parameter dictionary
+            modelDict = deepcopy(eval('model' + thisModel))
+            # and training options
+            trainingOptsPerModel[thisModel] = deepcopy(trainingOptions)
             
-            # Get name and architecture
-            thisName = hParamsDict.pop('name')
-            callArchit = hParamsDict.pop('archit')
+            # Now, this dictionary has all the hyperparameters that we need to
+            # pass to the architecture function, but it also has other keys
+            # that belong to the more general model (like 'name' or 'device'),
+            # so we need to extract them and save them in seperate variables
+            # for future use.
+            thisName = modelDict.pop('name')
+            callArchit = modelDict.pop('archit')
+            thisDevice = modelDict.pop('device')
+            thisTrainer = modelDict.pop('trainer')
+            thisEvaluator = modelDict.pop('evaluator')
             
             # If more than one graph or data realization is going to be 
             # carried out, we are going to store all of thos models
@@ -666,11 +735,11 @@ for graph in range(nGraphRealizations):
     
             #\\\ Optimizer options
             #   (If different from the default ones, change here.)
-            thisTrainer = trainer
+            thisOptimAlg = optimAlg
             thisLearningRate = learningRate
             thisBeta1 = beta1
             thisBeta2 = beta2
-            
+    
             #\\\ GSO
             # The coarsening technique is defined for the normalized and
             # rescaled Laplacian, whereas for the other ones we use the
@@ -678,54 +747,63 @@ for graph in range(nGraphRealizations):
             if 'crs' in thisModel:
                 L = graphTools.normalizeLaplacian(G.L)
                 EL, VL = graphTools.computeGFT(L, order = 'increasing')
-                S = 2*L/np.max(np.real(L)) - np.eye(nNodes)
+                S = 2*L/np.max(np.real(EL)) - np.eye(nNodes)
             else:
                 S = G.S.copy()/np.max(np.real(G.E))
                 
-            hParamsDict['GSO'] = S
+            modelDict['GSO'] = S
             
             ################
             # ARCHITECTURE #
             ################
     
-            thisArchit = callArchit(**hParamsDict)
-            thisArchit.to(device)
-
+            thisArchit = callArchit(**modelDict)
+            
             #############
             # OPTIMIZER #
             #############
     
-            if thisTrainer == 'ADAM':
+            if thisOptimAlg == 'ADAM':
                 thisOptim = optim.Adam(thisArchit.parameters(),
                                        lr = learningRate,
                                        betas = (beta1, beta2))
-            elif thisTrainer == 'SGD':
+            elif thisOptimAlg == 'SGD':
                 thisOptim = optim.SGD(thisArchit.parameters(),
                                       lr = learningRate)
-            elif thisTrainer == 'RMSprop':
+            elif thisOptimAlg == 'RMSprop':
                 thisOptim = optim.RMSprop(thisArchit.parameters(),
                                           lr = learningRate, alpha = beta1)
-                
+    
             ########
             # LOSS #
             ########
     
+            # Initialize the loss function
             thisLossFunction = loss.adaptExtraDimensionLoss(lossFunction)
-            
+    
             #########
             # MODEL #
             #########
     
+            # Create the model
             modelCreated = model.Model(thisArchit,
                                        thisLossFunction,
                                        thisOptim,
-                                       thisName, saveDir)
+                                       thisTrainer,
+                                       thisEvaluator,
+                                       thisDevice,
+                                       thisName,
+                                       saveDir)
     
+            # Store it
             modelsGNN[thisName] = modelCreated
     
+            # Write the main hyperparameters
             writeVarValues(varsFile,
                            {'name': thisName,
+                            'thisOptimizationAlgorithm': thisOptimAlg,
                             'thisTrainer': thisTrainer,
+                            'thisEvaluator': thisEvaluator,
                             'thisLearningRate': thisLearningRate,
                             'thisBeta1': thisBeta1,
                             'thisBeta2': thisBeta2})
@@ -742,118 +820,106 @@ for graph in range(nGraphRealizations):
         #                                                                   #
         #####################################################################
 
-
-        ############
-        # TRAINING #
-        ############
-
-        # On top of the rest of the training options, we pass the identification
-        # of this specific graph/data realization.
-
-        if nGraphRealizations > 1:
-            trainingOptions['graphNo'] = graph
-        if nDataRealizations > 1:
-            trainingOptions['realizationNo'] = realization
-
-        # This is the function that trains the models detailed in the dictionary
-        # modelsGNN using the data data, with the specified training options.
-        train.MultipleModels(modelsGNN, data,
-                             nEpochs = nEpochs, batchSize = batchSize,
-                             **trainingOptions)
+        print("")
+        
+        # We train each model separately
+    
+        for thisModel in modelsGNN.keys():
+            
+            if doPrint:
+                print("Training model %s..." % thisModel)
+             
+            # Remember that modelsGNN.keys() has the split numbering as well as 
+            # the name, while modelList has only the name. So we need to map 
+            # the specific model for this specific split with the actual model
+            # name, since there are several variables that are indexed by the
+            # model name (for instance, the training options, or the
+            # dictionaries saving the loss values)
+            for m in modelList:
+                if m in thisModel:
+                    modelName = m
+        
+            # Identify the specific graph and data realizations at training time
+            if nGraphRealizations > 1:
+                trainingOptions['graphNo'] = graph
+            if nDataRealizations > 1:
+                trainingOptions['realizationNo'] = realization
+            
+            # Train the model
+            thisTrainVars = modelsGNN[thisModel].train(data,
+                                                       nEpochs,
+                                                       batchSize,
+                                                       **trainingOptsPerModel[modelName])
+    
+            if doFigs:
+            # Find which model to save the results (when having multiple
+            # realizations)
+                lossTrain[modelName][graph] += [thisTrainVars['lossTrain']]
+                costTrain[modelName][graph] += [thisTrainVars['costTrain']]
+                lossValid[modelName][graph] += [thisTrainVars['lossValid']]
+                costValid[modelName][graph] += [thisTrainVars['costValid']]
+                        
+        # And we also need to save 'nBatch' but is the same for all models, so
+        if doFigs:
+            nBatches = thisTrainVars['nBatches']
 
         #%%##################################################################
         #                                                                   #
         #                    EVALUATION                                     #
         #                                                                   #
         #####################################################################
-
+        
         # Now that the model has been trained, we evaluate them on the test
         # samples.
-
+    
         # We have two versions of each model to evaluate: the one obtained
         # at the best result of the validation step, and the last trained model.
-
-        ########
-        # DATA #
-        ########
-
-        xTest, yTest = data.getSamples('test')
-        # Move to device
-        xTest = xTest.to(device)
-        yTest = yTest.to(device)
-
-        ##############
-        # BEST MODEL #
-        ##############
-
+    
         if doPrint:
-            print("Total testing error rate (Best):", flush = True)
-
-        for key in modelsGNN.keys():
-
-            with torch.no_grad():
-                # Process the samples
-                yHatTest = modelsGNN[key].archit(xTest)
-                # yHatTest is of shape
-                #   testSize x numberOfClasses
-                # We compute the accuracy
-                thisAccBest = data.evaluate(yHatTest, yTest)
-
-            if doPrint:
-                print("%s: %4.2f%%" % (key, thisAccBest * 100.), flush = True)
-
-            # Save value
+            print("\nTotal testing error rate", end = '', flush = True)
+            if nGraphRealizations > 1 or nDataRealizations > 1:
+                print(" (", end = '', flush = True)
+                if nGraphRealizations > 1:
+                    print("Graph %02d" % graph, end = '', flush = True)
+                    if nDataRealizations > 1:
+                        print(", ", end = '', flush = True)
+                if nDataRealizations > 1:
+                    print("Realization %02d" % realization, end = '',
+                          flush = True)
+                print(")", end = '', flush = True)
+            print(":", flush = True)
+            
+    
+        for thisModel in modelsGNN.keys():
+            
+            # Same as before, separate the model name from the data or graph
+            # realization number
+            for m in modelList:
+                if m in thisModel:
+                    modelName = m
+    
+            # Evaluate the model
+            thisEvalVars = modelsGNN[thisModel].evaluate(data)
+            
+            # Save the outputs
+            thisCostBest = thisEvalVars['costBest']
+            thisCostLast = thisEvalVars['costLast']
+            
+            # Write values
             writeVarValues(varsFile,
-                       {'accBest%s' % key: thisAccBest.item()})
-
+                           {'costBest%s' % thisModel: thisCostBest,
+                            'costLast%s' % thisModel: thisCostLast})
+    
             # Now check which is the model being trained
-            for thisModel in modelList:
-                # If the name in the modelList is contained in the name with
-                # the key, then that's the model, and save it
-                # For example, if 'SelGNNDeg' is in thisModelList, then the
-                # correct key will read something like 'SelGNNDegG01R00' so
-                # that's the one to save.
-                if thisModel in key:
-                    accBest[thisModel][graph] += [thisAccBest.item()]
-                # This is so that we can later compute a total accuracy with
-                # the corresponding error.
-
-            del yHatTest
-
-        ##############
-        # LAST MODEL #
-        ##############
-
-        # And repeat for the last model
-
-        if doPrint:
-            print("Total testing error rate (Last):", flush = True)
-
-        # Update order and adapt dimensions
-        for key in modelsGNN.keys():
-            # Load last saved parameters
-            modelsGNN[key].load(label = 'Last')
-
-            with torch.no_grad():
-                # Process the samples
-                yHatTest = modelsGNN[key].archit(xTest)
-                # yHatTest is of shape
-                #   testSize x numberOfClasses
-                # We compute the accuracy
-                thisAccLast = data.evaluate(yHatTest, yTest)
-
+            costBest[modelName][graph] += [thisCostBest]
+            costLast[modelName][graph] += [thisCostLast]
+            # This is so that we can later compute a total accuracy with
+            # the corresponding error.
+            
             if doPrint:
-                print("%s: %4.2f%%" % (key, thisAccLast * 100), flush = True)
-
-            # Save values:
-            writeVarValues(varsFile,
-                       {'accLast%s' % key: thisAccLast})
-            # And repeat for the last model:
-            for thisModel in modelList:
-                if thisModel in key:
-                    accLast[thisModel][graph] += [thisAccLast.item()]
-
-            del yHatTest
+                print("\t%s: %6.2f%% [Best] %6.2f%% [Last]" % (thisModel,
+                                                               thisCostBest*100,
+                                                               thisCostLast*100))
 
 ############################
 # FINAL EVALUATION RESULTS #
@@ -862,15 +928,15 @@ for graph in range(nGraphRealizations):
 # Now that we have computed the accuracy of all runs, we can obtain a final
 # result (mean and standard deviation)
 
-meanAccBestPerGraph = {} # Compute the mean accuracy (best) across all
+meanCostBestPerGraph = {} # Compute the mean accuracy (best) across all
     # realizations data realizations of a graph
-meanAccLastPerGraph = {} # Compute the mean accuracy (last) across all
+meanCostLastPerGraph = {} # Compute the mean accuracy (last) across all
     # realizations data realizations of a graph
-meanAccBest = {} # Mean across graphs (after having averaged across data
+meanCostBest = {} # Mean across graphs (after having averaged across data
     # realizations)
-meanAccLast = {} # Mean across graphs
-stdDevAccBest = {} # Standard deviation across graphs
-stdDevAccLast = {} # Standard deviation across graphs
+meanCostLast = {} # Mean across graphs
+stdDevCostBest = {} # Standard deviation across graphs
+stdDevCostLast = {} # Standard deviation across graphs
 
 if doPrint:
     print("\nFinal evaluations (%02d graphs, %02d realizations)" % (
@@ -878,38 +944,50 @@ if doPrint:
 
 for thisModel in modelList:
     # Convert the lists into a nGraphRealizations x nDataRealizations matrix
-    accBest[thisModel] = np.array(accBest[thisModel])
-    accLast[thisModel] = np.array(accLast[thisModel])
+    costBest[thisModel] = np.array(costBest[thisModel])
+    costLast[thisModel] = np.array(costLast[thisModel])
     
     if nGraphRealizations == 1 or nDataRealizations == 1:
-        meanAccBestPerGraph[thisModel] = np.squeeze(accBest[thisModel])
-        meanAccLastPerGraph[thisModel] = np.squeeze(accLast[thisModel])
+        meanCostBestPerGraph[thisModel] = np.squeeze(costBest[thisModel])
+        meanCostLastPerGraph[thisModel] = np.squeeze(costLast[thisModel])
     else:
         # Compute the mean (across realizations for a given graph)
-        meanAccBestPerGraph[thisModel] = np.mean(accBest[thisModel], axis = 1)
-        meanAccLastPerGraph[thisModel] = np.mean(accLast[thisModel], axis = 1)
+        meanCostBestPerGraph[thisModel] = np.mean(costBest[thisModel], axis = 1)
+        meanCostLastPerGraph[thisModel] = np.mean(costLast[thisModel], axis = 1)
 
     # And now compute the statistics (across graphs)
-    meanAccBest[thisModel] = np.mean(meanAccBestPerGraph[thisModel])
-    meanAccLast[thisModel] = np.mean(meanAccLastPerGraph[thisModel])
-    stdDevAccBest[thisModel] = np.std(meanAccBestPerGraph[thisModel])
-    stdDevAccLast[thisModel] = np.std(meanAccLastPerGraph[thisModel])
+    meanCostBest[thisModel] = np.mean(meanCostBestPerGraph[thisModel])
+    meanCostLast[thisModel] = np.mean(meanCostLastPerGraph[thisModel])
+    stdDevCostBest[thisModel] = np.std(meanCostBestPerGraph[thisModel])
+    stdDevCostLast[thisModel] = np.std(meanCostLastPerGraph[thisModel])
 
     # And print it:
     if doPrint:
         print("\t%s: %6.2f%% (+-%6.2f%%) [Best] %6.2f%% (+-%6.2f%%) [Last]" % (
                 thisModel,
-                meanAccBest[thisModel] * 100,
-                stdDevAccBest[thisModel] * 100,
-                meanAccLast[thisModel] * 100,
-                stdDevAccLast[thisModel] * 100))
+                meanCostBest[thisModel] * 100,
+                stdDevCostBest[thisModel] * 100,
+                meanCostLast[thisModel] * 100,
+                stdDevCostLast[thisModel] * 100))
 
     # Save values
     writeVarValues(varsFile,
-               {'meanAccBest%s' % thisModel: meanAccBest[thisModel],
-                'stdDevAccBest%s' % thisModel: stdDevAccBest[thisModel],
-                'meanAccLast%s' % thisModel: meanAccLast[thisModel],
-                'stdDevAccLast%s' % thisModel : stdDevAccLast[thisModel]})
+               {'meanCostBest%s' % thisModel: meanCostBest[thisModel],
+                'stdDevCostBest%s' % thisModel: stdDevCostBest[thisModel],
+                'meanCostLast%s' % thisModel: meanCostLast[thisModel],
+                'stdDevCostLast%s' % thisModel : stdDevCostLast[thisModel]})
+    
+with open(varsFile, 'a+') as file:
+    file.write("Final evaluations (%02d graphs, %02d realizations)\n" % (
+            nGraphRealizations, nDataRealizations))
+    for thisModel in modelList:
+        file.write("\t%s: %6.2f%% (+-%6.2f%%) [Best] %6.2f%% (+-%6.2f%%) [Last]\n" % (
+                   thisModel,
+                   meanCostBest[thisModel] * 100,
+                   stdDevCostBest[thisModel] * 100,
+                   meanCostLast[thisModel] * 100,
+                   stdDevCostLast[thisModel] * 100))
+    file.write('\n')
 
 #%%##################################################################
 #                                                                   #
@@ -920,161 +998,88 @@ for thisModel in modelList:
 # Finally, we might want to plot several quantities of interest
 
 if doFigs and doSaveVars:
-
+    
     ###################
     # DATA PROCESSING #
     ###################
-
-    # Again, we have training and validation metrics (loss and accuracy
-    # -evaluation-) for many runs, so we need to carefully load them and compute
-    # the relevant statistics from these realizations.
-
-    #\\\ SAVE SPACE:
-    # Create the variables to save all the realizations. This is, again, a
-    # dictionary, where each key represents a model, and each model is a list
-    # of lists, one list for each graph, and one list for each data realization.
-    # Each data realization, in this case, is not a scalar, but a vector of
-    # length the number of training steps (or of validation steps)
-    lossTrain = {}
-    evalTrain = {}
-    lossValid = {}
-    evalValid = {}
-    # Initialize the graph dimension
-    for thisModel in modelList:
-        lossTrain[thisModel] = [None] * nGraphRealizations
-        evalTrain[thisModel] = [None] * nGraphRealizations
-        lossValid[thisModel] = [None] * nGraphRealizations
-        evalValid[thisModel] = [None] * nGraphRealizations
-        # Initialize the data realization dimension with empty lists to then
-        # append each realization when we load it.
-        for G in range(nGraphRealizations):
-            lossTrain[thisModel][G] = []
-            evalTrain[thisModel][G] = []
-            lossValid[thisModel][G] = []
-            evalValid[thisModel][G] = []
-
+    
     #\\\ FIGURES DIRECTORY:
     saveDirFigs = os.path.join(saveDir,'figs')
     # If it doesn't exist, create it.
     if not os.path.exists(saveDirFigs):
         os.makedirs(saveDirFigs)
 
-    #\\\ LOAD DATA:
-    # Path where the saved training variables should be
-    pathToTrainVars = os.path.join(saveDir,'trainVars')
-    # Get all the training files:
-    allTrainFiles = next(os.walk(pathToTrainVars))[2]
-    # Go over each of them (this can't be empty since we are also checking for
-    # doSaveVars to be true, what guarantees that the variables have been saved.
-    for file in allTrainFiles:
-        # Check that it is a pickle file
-        if '.pkl' in file:
-            # Open the file
-            with open(os.path.join(pathToTrainVars,file),'rb') as fileTrainVars:
-                # Load it
-                thisVarsDict = pickle.load(fileTrainVars)
-                # store them
-                nBatches = thisVarsDict['nBatches']
-                thisLossTrain = thisVarsDict['lossTrain']
-                thisEvalTrain = thisVarsDict['evalTrain']
-                thisLossValid = thisVarsDict['lossValid']
-                thisEvalValid = thisVarsDict['evalValid']
-                if 'graphNo' in thisVarsDict.keys():
-                    thisG = thisVarsDict['graphNo']
-                else:
-                    thisG = 0
-                if 'realizationNo' in thisVarsDict.keys():
-                    thisR = thisVarsDict['realizationNo']
-                else:
-                    thisR = 0
-                # And add them to the corresponding variables
-                for key in thisLossTrain.keys():
-                # This part matches each realization (saved with a different
-                # name due to identification of graph and data realization) with
-                # the specific model.
-                    for thisModel in modelList:
-                        if thisModel in key:
-                            lossTrain[thisModel][thisG] += [thisLossTrain[key]]
-                            evalTrain[thisModel][thisG] += [thisEvalTrain[key]]
-                            lossValid[thisModel][thisG] += [thisLossValid[key]]
-                            evalValid[thisModel][thisG] += [thisEvalValid[key]]
-    # Now that we have collected all the results, we have that each of the four
-    # variables (lossTrain, evalTrain, lossValid, evalValid) has a list of lists
-    # for each key in the dictionary. The first list goes through the graph, and
-    # for each graph, it goes through data realizations. Each data realization
-    # is actually an np.array.
-
     #\\\ COMPUTE STATISTICS:
     # The first thing to do is to transform those into a matrix with all the
     # realizations, so create the variables to save that.
     meanLossTrainPerGraph = {}
-    meanEvalTrainPerGraph = {}
+    meanCostTrainPerGraph = {}
     meanLossValidPerGraph = {}
-    meanEvalValidPerGraph = {}
+    meanCostValidPerGraph = {}
     meanLossTrain = {}
-    meanEvalTrain = {}
+    meanCostTrain = {}
     meanLossValid = {}
-    meanEvalValid = {}
+    meanCostValid = {}
     stdDevLossTrain = {}
-    stdDevEvalTrain = {}
+    stdDevCostTrain = {}
     stdDevLossValid = {}
-    stdDevEvalValid = {}
+    stdDevCostValid = {}
     # Initialize the variables
     for thisModel in modelList:
         meanLossTrainPerGraph[thisModel] = [None] * nGraphRealizations
-        meanEvalTrainPerGraph[thisModel] = [None] * nGraphRealizations
+        meanCostTrainPerGraph[thisModel] = [None] * nGraphRealizations
         meanLossValidPerGraph[thisModel] = [None] * nGraphRealizations
-        meanEvalValidPerGraph[thisModel] = [None] * nGraphRealizations
+        meanCostValidPerGraph[thisModel] = [None] * nGraphRealizations
         if nGraphRealizations > 1:
             for G in range(nGraphRealizations):
                 # Transform into np.array
                 lossTrain[thisModel][G] = np.array(lossTrain[thisModel][G])
-                evalTrain[thisModel][G] = np.array(evalTrain[thisModel][G])
+                costTrain[thisModel][G] = np.array(costTrain[thisModel][G])
                 lossValid[thisModel][G] = np.array(lossValid[thisModel][G])
-                evalValid[thisModel][G] = np.array(evalValid[thisModel][G])
+                costValid[thisModel][G] = np.array(costValid[thisModel][G])
                 # So, finally, for each model and each graph, we have a np.array of
                 # shape:  nDataRealizations x number_of_training_steps
                 # And we have to average these to get the mean across all data
                 # realizations for each graph
                 meanLossTrainPerGraph[thisModel][G] = \
                                     np.mean(lossTrain[thisModel][G], axis = 0)
-                meanEvalTrainPerGraph[thisModel][G] = \
-                                    np.mean(evalTrain[thisModel][G], axis = 0)
+                meanCostTrainPerGraph[thisModel][G] = \
+                                    np.mean(costTrain[thisModel][G], axis = 0)
                 meanLossValidPerGraph[thisModel][G] = \
                                     np.mean(lossValid[thisModel][G], axis = 0)
-                meanEvalValidPerGraph[thisModel][G] = \
-                                    np.mean(evalValid[thisModel][G], axis = 0)
+                meanCostValidPerGraph[thisModel][G] = \
+                                    np.mean(costValid[thisModel][G], axis = 0)
         else:
             meanLossTrainPerGraph[thisModel] = lossTrain[thisModel][0]
-            meanEvalTrainPerGraph[thisModel] = evalTrain[thisModel][0]
+            meanCostTrainPerGraph[thisModel] = costTrain[thisModel][0]
             meanLossValidPerGraph[thisModel] = lossValid[thisModel][0]
-            meanEvalValidPerGraph[thisModel] = evalValid[thisModel][0]
+            meanCostValidPerGraph[thisModel] = costValid[thisModel][0]
         # And then convert this into np.array for all graphs
         meanLossTrainPerGraph[thisModel] = \
                                     np.array(meanLossTrainPerGraph[thisModel])
-        meanEvalTrainPerGraph[thisModel] = \
-                                    np.array(meanEvalTrainPerGraph[thisModel])
+        meanCostTrainPerGraph[thisModel] = \
+                                    np.array(meanCostTrainPerGraph[thisModel])
         meanLossValidPerGraph[thisModel] = \
                                     np.array(meanLossValidPerGraph[thisModel])
-        meanEvalValidPerGraph[thisModel] = \
-                                    np.array(meanEvalValidPerGraph[thisModel])
+        meanCostValidPerGraph[thisModel] = \
+                                    np.array(meanCostValidPerGraph[thisModel])
         # And compute the statistics
         meanLossTrain[thisModel] = \
                             np.mean(meanLossTrainPerGraph[thisModel], axis = 0)
-        meanEvalTrain[thisModel] = \
-                            np.mean(meanEvalTrainPerGraph[thisModel], axis = 0)
+        meanCostTrain[thisModel] = \
+                            np.mean(meanCostTrainPerGraph[thisModel], axis = 0)
         meanLossValid[thisModel] = \
                             np.mean(meanLossValidPerGraph[thisModel], axis = 0)
-        meanEvalValid[thisModel] = \
-                            np.mean(meanEvalValidPerGraph[thisModel], axis = 0)
+        meanCostValid[thisModel] = \
+                            np.mean(meanCostValidPerGraph[thisModel], axis = 0)
         stdDevLossTrain[thisModel] = \
                             np.std(meanLossTrainPerGraph[thisModel], axis = 0)
-        stdDevEvalTrain[thisModel] = \
-                            np.std(meanEvalTrainPerGraph[thisModel], axis = 0)
+        stdDevCostTrain[thisModel] = \
+                            np.std(meanCostTrainPerGraph[thisModel], axis = 0)
         stdDevLossValid[thisModel] = \
                             np.std(meanLossValidPerGraph[thisModel], axis = 0)
-        stdDevEvalValid[thisModel] = \
-                            np.std(meanEvalValidPerGraph[thisModel], axis = 0)
+        stdDevCostValid[thisModel] = \
+                            np.std(meanCostValidPerGraph[thisModel], axis = 0)
 
     ####################
     # SAVE FIGURE DATA #
@@ -1088,12 +1093,12 @@ if doFigs and doSaveVars:
     varsPickle['nBatches'] = nBatches
     varsPickle['meanLossTrain'] = meanLossTrain
     varsPickle['stdDevLossTrain'] = stdDevLossTrain
-    varsPickle['meanEvalTrain'] = meanEvalTrain
-    varsPickle['stdDevEvalTrain'] = stdDevEvalTrain
+    varsPickle['meanCostTrain'] = meanCostTrain
+    varsPickle['stdDevCostTrain'] = stdDevCostTrain
     varsPickle['meanLossValid'] = meanLossValid
     varsPickle['stdDevLossValid'] = stdDevLossValid
-    varsPickle['meanEvalValid'] = meanEvalValid
-    varsPickle['stdDevEvalValid'] = stdDevEvalValid
+    varsPickle['meanCostValid'] = meanCostValid
+    varsPickle['stdDevCostValid'] = stdDevCostValid
     with open(os.path.join(saveDirFigs,'figVars.pkl'), 'wb') as figVarsFile:
         pickle.dump(varsPickle, figVarsFile)
 
@@ -1118,9 +1123,9 @@ if doFigs and doSaveVars:
                                                     [selectSamplesTrain]
             stdDevLossTrain[thisModel] = stdDevLossTrain[thisModel]\
                                                         [selectSamplesTrain]
-            meanEvalTrain[thisModel] = meanEvalTrain[thisModel]\
+            meanCostTrain[thisModel] = meanCostTrain[thisModel]\
                                                     [selectSamplesTrain]
-            stdDevEvalTrain[thisModel] = stdDevEvalTrain[thisModel]\
+            stdDevCostTrain[thisModel] = stdDevCostTrain[thisModel]\
                                                         [selectSamplesTrain]
     # And same for the validation, if necessary.
     if xAxisMultiplierValid > 1:
@@ -1131,9 +1136,9 @@ if doFigs and doSaveVars:
                                                     [selectSamplesValid]
             stdDevLossValid[thisModel] = stdDevLossValid[thisModel]\
                                                         [selectSamplesValid]
-            meanEvalValid[thisModel] = meanEvalValid[thisModel]\
+            meanCostValid[thisModel] = meanCostValid[thisModel]\
                                                     [selectSamplesValid]
-            stdDevEvalValid[thisModel] = stdDevEvalValid[thisModel]\
+            stdDevCostValid[thisModel] = stdDevCostValid[thisModel]\
                                                         [selectSamplesValid]
 
     #\\\ LOSS (Training and validation) for EACH MODEL
@@ -1152,20 +1157,20 @@ if doFigs and doSaveVars:
         lossFig.savefig(os.path.join(saveDirFigs,'loss%s.pdf' % key),
                         bbox_inches = 'tight')
 
-    #\\\ ERROR RATE (Training and validation) for EACH MODEL
-    for key in meanEvalTrain.keys():
-        accFig = plt.figure(figsize=(1.61*figSize, 1*figSize))
-        plt.errorbar(xTrain, meanEvalTrain[key], yerr = stdDevEvalTrain[key],
+    #\\\ RMSE (Training and validation) for EACH MODEL
+    for key in meanCostTrain.keys():
+        costFig = plt.figure(figsize=(1.61*figSize, 1*figSize))
+        plt.errorbar(xTrain, meanCostTrain[key], yerr = stdDevCostTrain[key],
                      color = '#01256E', linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
-        plt.errorbar(xValid, meanEvalValid[key], yerr = stdDevEvalValid[key],
+        plt.errorbar(xValid, meanCostValid[key], yerr = stdDevCostValid[key],
                      color = '#95001A', linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
         plt.ylabel(r'Error rate')
         plt.xlabel(r'Training steps')
         plt.legend([r'Training', r'Validation'])
         plt.title(r'%s' % key)
-        accFig.savefig(os.path.join(saveDirFigs,'eval%s.pdf' % key),
+        costFig.savefig(os.path.join(saveDirFigs,'cost%s.pdf' % key),
                         bbox_inches = 'tight')
 
     # LOSS (training) for ALL MODELS
@@ -1180,14 +1185,41 @@ if doFigs and doSaveVars:
     allLossTrain.savefig(os.path.join(saveDirFigs,'allLossTrain.pdf'),
                     bbox_inches = 'tight')
 
-    # ERROR RATE (validation) for ALL MODELS
-    allEvalValid = plt.figure(figsize=(1.61*figSize, 1*figSize))
-    for key in meanEvalValid.keys():
-        plt.errorbar(xValid, meanEvalValid[key], yerr = stdDevEvalValid[key],
+    # RMSE (validation) for ALL MODELS
+    allCostValidFig = plt.figure(figsize=(1.61*figSize, 1*figSize))
+    for key in meanCostValid.keys():
+        plt.errorbar(xValid, meanCostValid[key], yerr = stdDevCostValid[key],
                      linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
     plt.ylabel(r'Error rate')
     plt.xlabel(r'Training steps')
-    plt.legend(list(meanEvalValid.keys()))
-    allEvalValid.savefig(os.path.join(saveDirFigs,'allEvalValid.pdf'),
+    plt.legend(list(meanCostValid.keys()))
+    allCostValidFig.savefig(os.path.join(saveDirFigs,'allCostValid.pdf'),
                     bbox_inches = 'tight')
+
+# Finish measuring time
+endRunTime = datetime.datetime.now()
+
+totalRunTime = abs(endRunTime - startRunTime)
+totalRunTimeH = int(divmod(totalRunTime.total_seconds(), 3600)[0])
+totalRunTimeM, totalRunTimeS = \
+               divmod(totalRunTime.total_seconds() - totalRunTimeH * 3600., 60)
+totalRunTimeM = int(totalRunTimeM)
+
+if doPrint:
+    print(" ")
+    print("Simulation started: %s" %startRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    print("Simulation ended:   %s" % endRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    print("Total time: %dh %dm %.2fs" % (totalRunTimeH,
+                                         totalRunTimeM,
+                                         totalRunTimeS))
+    
+# And save this info into the .txt file as well
+with open(varsFile, 'a+') as file:
+    file.write("Simulation started: %s\n" % 
+                                     startRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    file.write("Simulation ended:   %s\n" % 
+                                       endRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    file.write("Total time: %dh %dm %.2fs" % (totalRunTimeH,
+                                              totalRunTimeM,
+                                              totalRunTimeS))

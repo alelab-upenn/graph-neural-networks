@@ -2,27 +2,25 @@
 # Fernando Gama, fgama@seas.upenn.edu
 # Luana Ruiz, rubruiz@seas.upenn.edu
 
-# Test the movie recommendation dataset on several architectures.
+# Test a movie recommendation problem. The nodes are either items or users
+# and the edges are rating similarities estimated by a Pearson correlation
+# coefficient (either rating similarities between items or rating similarities
+# between users). The graph signal defined on top of this graph are the
+# ratings given to items by a specific user (if the nodes are items) or the
+# ratings given by the users to a specific item (if the nodes are users).
+# The objective is to estimate the rating on a target node(s), that is, an
+# interpolation problem of the graph signal at a target node(s).
 
-# When it runs, it produces the following output:
-#   - It trains the specified models and saves the best and the last model
-#       parameters of each realization on a directory named 'savedModels'.
-#   - It saves a pickle file with the torch random state and the numpy random
-#       state for reproducibility.
-#   - It saves a text file 'hyperparameters.txt' containing the specific
-#       (hyper)parameters that control the run, together with the main (scalar)
-#       results obtained.
-#   - If desired, logs in tensorboardX the training loss and evaluation measure
-#       both of the training set and the validation set. These tensorboardX logs
-#       are saved in a logsTB directory.
-#   - If desired, saves the vector variables of each realization (training and
-#       validation loss and evaluation measure, respectively); this is saved
-#       in pickle format. These variables are saved in a trainVars directory.
-#   - If desired, plots the training and validation loss and evaluation
-#       performance for each of the models, together with the training loss and
-#       validation evaluation performance for all models. The summarizing
-#       variables used to construct the plots are also saved in pickle format. 
-#       These plots (and variables) are in a figs directory.
+# Outputs:
+# - Text file with all the hyperparameters selected for the run and the 
+#   corresponding results (hyperparameters.txt)
+# - Pickle file with the random seeds of both torch and numpy for accurate
+#   reproduction of results (randomSeedUsed.pkl)
+# - The parameters of the trained models, for both the Best and the Last
+#   instance of each model (savedModels/)
+# - The figures of loss and evaluation through the training iterations for
+#   each model (figs/ and trainVars/)
+# - If selected, logs in tensorboardX certain useful training variables
 
 #%%##################################################################
 #                                                                   #
@@ -36,6 +34,7 @@ import numpy as np
 import matplotlib
 matplotlib.rcParams['text.usetex'] = True
 matplotlib.rcParams['font.family'] = 'serif'
+matplotlib.rcParams['text.latex.preamble']=[r'\usepackage{amsmath}']
 import matplotlib.pyplot as plt
 import pickle
 import datetime
@@ -51,12 +50,16 @@ import Utils.dataTools
 import Utils.graphML as gml
 import Modules.architectures as archit
 import Modules.model as model
-import Modules.train as train
+import Modules.training as training
+import Modules.evaluation as evaluation
 import Modules.loss as loss
 
 #\\\ Separate functions:
 from Utils.miscTools import writeVarValues
 from Utils.miscTools import saveSeed
+
+# Start measuring time
+startRunTime = datetime.datetime.now()
 
 #%%##################################################################
 #                                                                   #
@@ -67,7 +70,7 @@ from Utils.miscTools import saveSeed
 graphType = 'movie' # Graph type: 'user'-based or 'movie'-based
 labelID = [50] # Which node to focus on (either a list or the str 'all')
 # When 'movie': [1]: Toy Story, [50]: Star Wars, [258]: Contact,
-# [100]: Fargo, [180]: Return of the Jedi, [294]: Liar, liar
+# [100]: Fargo, [181]: Return of the Jedi, [294]: Liar, liar
 if labelID == 'all':
     labelIDstr = 'all'
 elif len(labelID) == 1:
@@ -129,8 +132,14 @@ ratioValid = 0.1 # Ratio of validation samples (out of the total training
 #   nValidation = round(ratioValid * ratioTrain * nTotal)
 #   nTrain = round((1 - ratioValid) * ratioTrain * nTotal)
 #   nTest = nTotal - nTrain - nValidation
+maxNodes = None # Maximum number of nodes (select the ones with the largest
+#   number of ratings)
+minRatings = 0 # Discard samples (rows and columns) with less than minRatings 
+    # ratings
+interpolateRatings = False # Interpolate ratings with nearest-neighbors rule
+    # before feeding them into the GNN
 
-nDataSplits = 1 # Number of data realizations
+nDataSplits = 10 # Number of data realizations
 # Obs.: The built graph depends on the split between training, validation and
 # testing. Therefore, we will run several of these splits and average across
 # them, to obtain some result that is more robust to this split.
@@ -139,10 +148,10 @@ nDataSplits = 1 # Number of data realizations
 # could happen that it is disconnected, or directed, or what not. In other 
 # words, we might want to force (by removing nodes) some useful characteristics
 # on the graph
-keepIsolatedNodes = False # If True keeps isolated nodes
+keepIsolatedNodes = True # If True keeps isolated nodes ---> FALSE
 forceUndirected = True # If True forces the graph to be undirected
-forceConnected = True # If True returns the largest connected component of the
-    # graph as the main graph
+forceConnected = False # If True returns the largest connected component of the
+    # graph as the main graph ---> TRUE
 kNN = 10 # Number of nearest neighbors
 
 maxDataPoints = None # None to consider all data points
@@ -153,6 +162,9 @@ writeVarValues(varsFile,
                 'graphType': graphType,
                 'ratioTrain': ratioTrain,
                 'ratioValid': ratioValid,
+                'maxNodes': maxNodes,
+                'minRatings': minRatings,
+                'interpolateRatings': interpolateRatings,
                 'nDataSplits': nDataSplits,
                 'keepIsolatedNodes': keepIsolatedNodes,
                 'forceUndirected': forceUndirected,
@@ -166,17 +178,13 @@ writeVarValues(varsFile,
 ############
 
 #\\\ Individual model training options
-trainer = 'ADAM' # Options: 'SGD', 'ADAM', 'RMSprop'
+optimAlg = 'ADAM' # Options: 'SGD', 'ADAM', 'RMSprop'
 learningRate = 0.005 # In all options
 beta1 = 0.9 # beta1 if 'ADAM', alpha if 'RMSprop'
 beta2 = 0.999 # ADAM option only
 
 #\\\ Loss function choice
 lossFunction = nn.SmoothL1Loss
-minRatings = 0 # Discard samples (rows and columns) with less than minRatings 
-    # ratings
-interpolateRatings = False # Interpolate ratings with nearest-neighbors rule
-    # before feeding them into the GNN
 
 #\\\ Overall training options
 nEpochs = 40 # Number of epochs
@@ -188,13 +196,11 @@ validationInterval = 5 # How many training steps to do the validation
 
 #\\\ Save values
 writeVarValues(varsFile,
-               {'trainer': trainer,
+               {'optimAlg': optimAlg,
                 'learningRate': learningRate,
                 'beta1': beta1,
                 'beta2': beta2,
                 'lossFunction': lossFunction,
-                'minRatings': minRatings,
-                'interpolateRatings': interpolateRatings,
                 'nEpochs': nEpochs,
                 'batchSize': batchSize,
                 'doLearningRateDecay': doLearningRateDecay,
@@ -223,12 +229,12 @@ do2Layers = True
 # created later below. Do not forget to add the name of the architecture
 # to modelList.
 
-# If the hyperparameter dictionary is called 'hParams' + name, then it can be
+# If the model dictionary is called 'model' + name, then it can be
 # picked up immediately later on, and there's no need to recode anything after
 # the section 'Setup' (except for setting the number of nodes in the 'N' 
 # variable after it has been coded).
 
-# The name of the keys in the hyperparameter dictionary have to be the same
+# The name of the keys in the model dictionary have to be the same
 # as the names of the variables in the architecture call, because they will
 # be called by unpacking the dictionary.
 
@@ -242,57 +248,69 @@ if doSelectionGNN:
 
     #\\\ Basic parameters for all the Selection GNN architectures
     
-    hParamsSelGNN = {} # Hyperparameters (hParams) for the Selection GNN (SelGNN)
+    modelSelGNN = {} # Model parameters for the Selection GNN (SelGNN)
+    modelSelGNN['name'] = 'SelGNN'
+    modelSelGNN['device'] = 'cuda:0' if (useGPU and torch.cuda.is_available()) \
+                                     else 'cpu'
     
-    hParamsSelGNN['name'] = 'SelGNN'
+    #\\\ ARCHITECTURE
+    
     # Chosen architecture
-    hParamsSelGNN['archit'] = archit.SelectionGNN
-    
+    modelSelGNN['archit'] = archit.SelectionGNN
     # Graph convolutional parameters
-    hParamsSelGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
-    hParamsSelGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
-    hParamsSelGNN['bias'] = True # Decide whether to include a bias term
+    modelSelGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
+    modelSelGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
+    modelSelGNN['bias'] = True # Decide whether to include a bias term
     # Nonlinearity
-    hParamsSelGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
+    modelSelGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
     # Pooling
-    hParamsSelGNN['poolingFunction'] = gml.NoPool # Summarizing function
-    hParamsSelGNN['nSelectedNodes'] = None # To be determined later on
-    hParamsSelGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
+    modelSelGNN['poolingFunction'] = gml.NoPool # Summarizing function
+    modelSelGNN['nSelectedNodes'] = None # To be determined later on
+    modelSelGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
         # is affected by the summary
     # Full MLP readout layer (this layer breaks the locality of the solution)
-    hParamsSelGNN['dimLayersMLP'] = [1] # Dimension of the fully connected
+    modelSelGNN['dimLayersMLP'] = [1] # Dimension of the fully connected
         # layers after the GCN layers, we just need to output a single scalar
     # Graph structure
-    hParamsSelGNN['GSO'] = None # To be determined later on, based on data
-    hParamsSelGNN['order'] = None # Not used because there is no pooling
+    modelSelGNN['GSO'] = None # To be determined later on, based on data
+    modelSelGNN['order'] = None # Not used because there is no pooling
+    
+    #\\\ TRAINER
+
+    modelSelGNN['trainer'] = training.Trainer
+    
+    #\\\ EVALUATOR
+    
+    modelSelGNN['evaluator'] = evaluation.evaluate
+    
 
 #\\\\\\\\\\\\
 #\\\ MODEL 1: Selection GNN with 1 less layer
 #\\\\\\\\\\\\
 
-    hParamsSelGNN1Ly = deepcopy(hParamsSelGNN)
+    modelSelGNN1Ly = deepcopy(modelSelGNN)
 
-    hParamsSelGNN1Ly['name'] += '1Ly' # Name of the architecture
+    modelSelGNN1Ly['name'] += '1Ly' # Name of the architecture
     
-    hParamsSelGNN1Ly['dimNodeSignals'] = hParamsSelGNN['dimNodeSignals'][0:-1]
-    hParamsSelGNN1Ly['nFilterTaps'] = hParamsSelGNN['nFilterTaps'][0:-1]
-    hParamsSelGNN1Ly['poolingSize'] = hParamsSelGNN['poolingSize'][0:-1]
+    modelSelGNN1Ly['dimNodeSignals'] = modelSelGNN['dimNodeSignals'][0:-1]
+    modelSelGNN1Ly['nFilterTaps'] = modelSelGNN['nFilterTaps'][0:-1]
+    modelSelGNN1Ly['poolingSize'] = modelSelGNN['poolingSize'][0:-1]
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNN1Ly)
-    modelList += [hParamsSelGNN1Ly['name']]
+    writeVarValues(varsFile, modelSelGNN1Ly)
+    modelList += [modelSelGNN1Ly['name']]
     
 #\\\\\\\\\\\\
 #\\\ MODEL 2: Selection GNN with all Layers
 #\\\\\\\\\\\\
 
-    hParamsSelGNN2Ly = deepcopy(hParamsSelGNN)
+    modelSelGNN2Ly = deepcopy(modelSelGNN)
 
-    hParamsSelGNN2Ly['name'] += '2Ly' # Name of the architecture
+    modelSelGNN2Ly['name'] += '2Ly' # Name of the architecture
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsSelGNN2Ly)
-    modelList += [hParamsSelGNN2Ly['name']]
+    writeVarValues(varsFile, modelSelGNN2Ly)
+    modelList += [modelSelGNN2Ly['name']]
 
     
 #\\\\\\\\\\\\\\\\\
@@ -303,59 +321,70 @@ if doLocalGNN:
 
     #\\\ Basic parameters for all the Local GNN architectures
     
-    hParamsLclGNN = {} # Hyperparameters (hParams) for the Local GNN (LclGNN)
+    modelLclGNN = {} # Model parameters for the Local GNN (LclGNN)
+    modelLclGNN['name'] = 'LclGNN'
+    modelLclGNN['device'] = 'cuda:0' if (useGPU and torch.cuda.is_available()) \
+                                     else 'cpu'
     
-    hParamsLclGNN['name'] = 'LclGNN'
+    #\\\ ARCHITECTURE
+    
     # Chosen architecture
-    hParamsLclGNN['archit'] = archit.LocalGNN
-    
+    modelLclGNN['archit'] = archit.LocalGNN
     # Graph convolutional parameters
-    hParamsLclGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
-    hParamsLclGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
-    hParamsLclGNN['bias'] = True # Decide whether to include a bias term
+    modelLclGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
+    modelLclGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
+    modelLclGNN['bias'] = True # Decide whether to include a bias term
     # Nonlinearity
-    hParamsLclGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
+    modelLclGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
     # Pooling
-    hParamsLclGNN['poolingFunction'] = gml.NoPool # Summarizing function
-    hParamsLclGNN['nSelectedNodes'] = None # To be determined later on
-    hParamsLclGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
+    modelLclGNN['poolingFunction'] = gml.NoPool # Summarizing function
+    modelLclGNN['nSelectedNodes'] = None # To be determined later on
+    modelLclGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
         # is affected by the summary
     # Readout layer: local linear combination of features
-    hParamsLclGNN['dimReadout'] = [1] # Dimension of the fully connected layers
+    modelLclGNN['dimReadout'] = [1] # Dimension of the fully connected layers
         # after the GCN layers (map); this fully connected layer is applied only
         # at each node, without any further exchanges nor considering all nodes
         # at once, making the architecture entirely local.
     # Graph structure
-    hParamsLclGNN['GSO'] = None # To be determined later on, based on data
-    hParamsLclGNN['order'] = None # Not used because there is no pooling
+    modelLclGNN['GSO'] = None # To be determined later on, based on data
+    modelLclGNN['order'] = None # Not used because there is no pooling
+    
+    #\\\ TRAINER
+
+    modelLclGNN['trainer'] = training.TrainerSingleNode
+    
+    #\\\ EVALUATOR
+    
+    modelLclGNN['evaluator'] = evaluation.evaluateSingleNode
 
 #\\\\\\\\\\\\
 #\\\ MODEL 3: Local GNN with 1 less layer
 #\\\\\\\\\\\\
 
-    hParamsLclGNN1Ly = deepcopy(hParamsLclGNN)
+    modelLclGNN1Ly = deepcopy(modelLclGNN)
 
-    hParamsLclGNN1Ly['name'] += '1Ly' # Name of the architecture
+    modelLclGNN1Ly['name'] += '1Ly' # Name of the architecture
     
-    hParamsLclGNN1Ly['dimNodeSignals'] = hParamsLclGNN['dimNodeSignals'][0:-1]
-    hParamsLclGNN1Ly['nFilterTaps'] = hParamsLclGNN['nFilterTaps'][0:-1]
-    hParamsLclGNN1Ly['poolingSize'] = hParamsLclGNN['poolingSize'][0:-1]
+    modelLclGNN1Ly['dimNodeSignals'] = modelLclGNN['dimNodeSignals'][0:-1]
+    modelLclGNN1Ly['nFilterTaps'] = modelLclGNN['nFilterTaps'][0:-1]
+    modelLclGNN1Ly['poolingSize'] = modelLclGNN['poolingSize'][0:-1]
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsLclGNN1Ly)
-    modelList += [hParamsLclGNN1Ly['name']]
+    writeVarValues(varsFile, modelLclGNN1Ly)
+    modelList += [modelLclGNN1Ly['name']]
     
 #\\\\\\\\\\\\
 #\\\ MODEL 4: Local GNN with all Layers
 #\\\\\\\\\\\\
 
-    hParamsLclGNN2Ly = deepcopy(hParamsLclGNN)
+    modelLclGNN2Ly = deepcopy(modelLclGNN)
 
-    hParamsLclGNN2Ly['name'] += '2Ly' # Name of the architecture
+    modelLclGNN2Ly['name'] += '2Ly' # Name of the architecture
 
     #\\\ Save Values:
-    writeVarValues(varsFile, hParamsLclGNN2Ly)
-    modelList += [hParamsLclGNN2Ly['name']]
+    writeVarValues(varsFile, modelLclGNN2Ly)
+    modelList += [modelLclGNN2Ly['name']]
 
 ###########
 # LOGGING #
@@ -367,7 +396,7 @@ doLogging = False # Log into tensorboard
 doSaveVars = True # Save (pickle) useful variables
 doFigs = True # Plot some figures (this only works if doSaveVars is True)
 # Parameters:
-printInterval = 0 # After how many training steps, print the partial results
+printInterval = 5 # After how many training steps, print the partial results
 #   0 means to never print partial results while training
 xAxisMultiplierTrain = 100 # How many training steps in between those shown in
     # the plot, i.e., one training step every xAxisMultiplierTrain is shown.
@@ -399,13 +428,14 @@ writeVarValues(varsFile,
 
 #\\\ Determine processing unit:
 if useGPU and torch.cuda.is_available():
-    device = 'cuda:0'
     torch.cuda.empty_cache()
-else:
-    device = 'cpu'
-# Notify:
+
+#\\\ Notify of processing units
 if doPrint:
-    print("Device selected: %s" % device)
+    print("Selected devices:")
+    for thisModel in modelList:
+        modelDict = eval('model' + thisModel)
+        print("\t%s: %s" % (thisModel, modelDict['device']))
 
 #\\\ Logging options
 if doLogging:
@@ -420,12 +450,29 @@ if doLogging:
 # dictionary determines the model, then the first list index determines
 # which split realization. Then, this will be converted to numpy to compute
 # mean and standard deviation (across the split dimension).
-accBest = {} # Accuracy for the best model
-accLast = {} # Accuracy for the last model
+costBest = {} # Cost for the best model (Evaluation cost: RMSE)
+costLast = {} # Cost for the last model
 for thisModel in modelList: # Create an element for each split realization,
-    accBest[thisModel] = [None] * nDataSplits
-    accLast[thisModel] = [None] * nDataSplits
+    costBest[thisModel] = [None] * nDataSplits
+    costLast[thisModel] = [None] * nDataSplits
 
+if doFigs:
+    #\\\ SAVE SPACE:
+    # Create the variables to save all the realizations. This is, again, a
+    # dictionary, where each key represents a model, and each model is a list
+    # for each data split.
+    # Each data split, in this case, is not a scalar, but a vector of
+    # length the number of training steps (or of validation steps)
+    lossTrain = {}
+    costTrain = {}
+    lossValid = {}
+    costValid = {}
+    # Initialize the splits dimension
+    for thisModel in modelList:
+        lossTrain[thisModel] = [None] * nDataSplits
+        costTrain[thisModel] = [None] * nDataSplits
+        lossValid[thisModel] = [None] * nDataSplits
+        costValid[thisModel] = [None] * nDataSplits
 
 ####################
 # TRAINING OPTIONS #
@@ -448,6 +495,11 @@ if doLearningRateDecay:
     trainingOptions['learningRateDecayRate'] = learningRateDecayRate
     trainingOptions['learningRateDecayPeriod'] = learningRateDecayPeriod
 trainingOptions['validationInterval'] = validationInterval
+
+# And in case each model has specific training options, then we create a 
+# separate dictionary per model.
+
+trainingOptsPerModel= {}
 
 #%%##################################################################
 #                                                                   #
@@ -477,9 +529,17 @@ for split in range(nDataSplits):
         print("...", end = ' ', flush = True)
 
     #   Load the data, which will give a specific split
-    data = Utils.dataTools.MovieLens(graphType, labelID, ratioTrain, ratioValid,
-                                     dataDir, keepIsolatedNodes,
-                                     forceUndirected, forceConnected, kNN,
+    data = Utils.dataTools.MovieLens(graphType, # 'user' or 'movies'
+                                     labelID, # ID of node to interpolate
+                                     ratioTrain, # ratio of training samples
+                                     ratioValid, # ratio of validation samples
+                                     dataDir, # directory where dataset is
+                                     # Extra options
+                                     keepIsolatedNodes,
+                                     forceUndirected,
+                                     forceConnected,
+                                     kNN, # Number of nearest neighbors
+                                     maxNodes = maxNodes,
                                      maxDataPoints = maxDataPoints,
                                      minRatings = minRatings,
                                      interpolate = interpolateRatings)
@@ -507,9 +567,11 @@ for split in range(nDataSplits):
     # Once data is completely formatted and in appropriate fashion, change its
     # type to torch
     data.astype(torch.float64)
-    # data.to(device)
     # And the corresponding feature dimension that we will need to use
-    data.expandDims()
+    data.expandDims() # Data are just graph signals, but the architectures 
+        # require that the input signals are of the form B x F x N, so we need
+        # to expand the middle dimensions to convert them from B x N to
+        # B x 1 x N
     
     if doPrint:
         print("OK")
@@ -532,14 +594,19 @@ for split in range(nDataSplits):
     for thisModel in modelList:
         
         # Get the corresponding parameter dictionary
-        hParamsDict = deepcopy(eval('hParams' + thisModel))
+        modelDict = deepcopy(eval('model' + thisModel))
+        # and training options
+        trainingOptsPerModel[thisModel] = deepcopy(trainingOptions)
         
         # Now, this dictionary has all the hyperparameters that we need to pass
-        # to the architecture, but it also has the 'name' and 'archit' that
-        # we do not need to pass them. So we are going to get them out of
-        # the dictionary
-        thisName = hParamsDict.pop('name')
-        callArchit = hParamsDict.pop('archit')
+        # to the architecture function, but it also has other keys that belong
+        # to the more general model (like 'name' or 'device'), so we need to
+        # extract them and save them in seperate variables for future use.
+        thisName = modelDict.pop('name')
+        callArchit = modelDict.pop('archit')
+        thisDevice = modelDict.pop('device')
+        thisTrainer = modelDict.pop('trainer')
+        thisEvaluator = modelDict.pop('evaluator')
         
         # If more than one graph or data realization is going to be carried out,
         # we are going to store all of thos models separately, so that any of
@@ -557,7 +624,7 @@ for split in range(nDataSplits):
 
         #\\\ Optimizer options
         #   (If different from the default ones, change here.)
-        thisTrainer = trainer
+        thisOptimAlg = optimAlg
         thisLearningRate = learningRate
         thisBeta1 = beta1
         thisBeta2 = beta2
@@ -565,32 +632,31 @@ for split in range(nDataSplits):
         #\\\ Ordering
         S = G.S.copy()/np.max(np.real(G.E))
         # Do not forget to add the GSO to the input parameters of the archit
-        hParamsDict['GSO'] = S
+        modelDict['GSO'] = S
         # Add the number of nodes for the no-pooling part
         if '1Ly' in thisName:
-            hParamsDict['nSelectedNodes'] = [nNodes]
+            modelDict['nSelectedNodes'] = [nNodes]
         elif '2Ly' in thisName:
-            hParamsDict['nSelectedNodes'] = [nNodes, nNodes]
+            modelDict['nSelectedNodes'] = [nNodes, nNodes]
         
         ################
         # ARCHITECTURE #
         ################
 
-        thisArchit = callArchit(**hParamsDict)
-        thisArchit.to(device)
+        thisArchit = callArchit(**modelDict)
         
         #############
         # OPTIMIZER #
         #############
 
-        if thisTrainer == 'ADAM':
+        if thisOptimAlg == 'ADAM':
             thisOptim = optim.Adam(thisArchit.parameters(),
                                    lr = learningRate,
                                    betas = (beta1, beta2))
-        elif thisTrainer == 'SGD':
+        elif thisOptimAlg == 'SGD':
             thisOptim = optim.SGD(thisArchit.parameters(),
                                   lr = learningRate)
-        elif thisTrainer == 'RMSprop':
+        elif thisOptimAlg == 'RMSprop':
             thisOptim = optim.RMSprop(thisArchit.parameters(),
                                       lr = learningRate, alpha = beta1)
 
@@ -598,22 +664,32 @@ for split in range(nDataSplits):
         # LOSS #
         ########
 
+        # Initialize the loss function
         thisLossFunction = loss.adaptExtraDimensionLoss(lossFunction)
 
         #########
         # MODEL #
         #########
 
+        # Create the model
         modelCreated = model.Model(thisArchit,
                                    thisLossFunction,
                                    thisOptim,
-                                   thisName, saveDir)
+                                   thisTrainer,
+                                   thisEvaluator,
+                                   thisDevice,
+                                   thisName,
+                                   saveDir)
 
+        # Store it
         modelsGNN[thisName] = modelCreated
 
+        # Write the main hyperparameters
         writeVarValues(varsFile,
                        {'name': thisName,
+                        'thisOptimizationAlgorithm': thisOptimAlg,
                         'thisTrainer': thisTrainer,
+                        'thisEvaluator': thisEvaluator,
                         'thisLearningRate': thisLearningRate,
                         'thisBeta1': thisBeta1,
                         'thisBeta2': thisBeta2})
@@ -629,23 +705,47 @@ for split in range(nDataSplits):
     #                    TRAINING                                       #
     #                                                                   #
     #####################################################################
+    
+    print("")
+    
+    # We train each model separately
+    
+    for thisModel in modelsGNN.keys():
+        
+        if doPrint:
+            print("Training model %s..." % thisModel)
+        
+        # Remember that modelsGNN.keys() has the split numbering as well as the
+        # name, while modelList has only the name. So we need to map the
+        # specific model for this specific split with the actual model name,
+        # since there are several variables that are indexed by the model name
+        # (for instance, the training options, or the dictionaries saving the
+        # loss values)
+        for m in modelList:
+            if m in thisModel:
+                modelName = m
+        
+        # Identify the specific split number at training time
+        if nDataSplits > 1:
+            trainingOptsPerModel[modelName]['graphNo'] = split
+        
+        # Train the model
+        thisTrainVars = modelsGNN[thisModel].train(data,
+                                                   nEpochs,
+                                                   batchSize,
+                                                   **trainingOptsPerModel[modelName])
 
-
-    ############
-    # TRAINING #
-    ############
-
-    # On top of the rest of the training options, we pass the identification
-    # of this specific data split realization.
-
-    if nDataSplits > 1:
-        trainingOptions['graphNo'] = split
-
-    # This is the function that trains the models detailed in the dictionary
-    # modelsGNN using the data data, with the specified training options.
-    train.MultipleModels(modelsGNN, data,
-                         nEpochs = nEpochs, batchSize = batchSize,
-                         **trainingOptions)
+        if doFigs:
+        # Find which model to save the results (when having multiple
+        # realizations)
+            lossTrain[modelName][split] = thisTrainVars['lossTrain']
+            costTrain[modelName][split] = thisTrainVars['costTrain']
+            lossValid[modelName][split] = thisTrainVars['lossValid']
+            costValid[modelName][split] = thisTrainVars['costValid']
+                    
+    # And we also need to save 'nBatches' but is the same for all models, so
+    if doFigs:
+        nBatches = thisTrainVars['nBatches']
 
     #%%##################################################################
     #                                                                   #
@@ -659,102 +759,42 @@ for split in range(nDataSplits):
     # We have two versions of each model to evaluate: the one obtained
     # at the best result of the validation step, and the last trained model.
 
-    ########
-    # DATA #
-    ########
-
-    xTest, yTest = data.getSamples('test')
-    xTest = xTest.to(device)
-    yTest = yTest.to(device)
-
-    ##############
-    # BEST MODEL #
-    ##############
-
     if doPrint:
-        print("Total testing RMSE (Best):", flush = True)
+        print("Total testing RMSE", end = '', flush = True)
+        if nDataSplits > 1:
+            print(" (Split %02d)" % split, end = '', flush = True)
+        print(":", flush = True)
+        
 
-    for key in modelsGNN.keys():
+    for thisModel in modelsGNN.keys():
+        
+        # Same as before, separate the model name from the data split
+        # realization number
+        for m in modelList:
+            if m in thisModel:
+                modelName = m
 
-        with torch.no_grad():
-            # Process the samples
-            if 'singleNodeForward' in dir(modelsGNN[key].archit):
-                if 'getLabelID' in dir(data):
-                    targetIDs = data.getLabelID('test')
-                    yHatTest = modelsGNN[key].archit\
-                                            .singleNodeForward(xTest, targetIDs)
-            else:
-                yHatTest = modelsGNN[key].archit(xTest)
-            # yHatTest is of shape
-            #   testSize x numberOfClasses
-            # We compute the accuracy
-            thisAccBest = data.evaluate(yHatTest, yTest)
-
-        if doPrint:
-            print("%s: %6.4f" % (key, thisAccBest), flush = True)
-
-        # Save value
+        # Evaluate the model
+        thisEvalVars = modelsGNN[thisModel].evaluate(data)
+        
+        # Save the outputs
+        thisCostBest = thisEvalVars['costBest']
+        thisCostLast = thisEvalVars['costLast']
+        
+        # Write values
         writeVarValues(varsFile,
-                   {'accBest%s' % key: thisAccBest})
+                       {'costBest%s' % thisModel: thisCostBest,
+                        'costLast%s' % thisModel: thisCostLast})
 
         # Now check which is the model being trained
-        for thisModel in modelList:
-            # If the name in the modelList is contained in the name with
-            # the key, then that's the model, and save it
-            # For example, if 'SelGNNDeg' is in thisModelList, then the
-            # correct key will read something like 'SelGNNDegG01' so
-            # that's the one to save.
-            if thisModel in key:
-                accBest[thisModel][split] = thisAccBest.item()
-            # This is so that we can later compute a total accuracy with
-            # the corresponding error.
-
-        del yHatTest
-        del thisAccBest
-
-    ##############
-    # LAST MODEL #
-    ##############
-
-    # And repeat for the last model
-
-    if doPrint:
-        print("Total testing RMSE (Last):", flush = True)
-
-    # Update order and adapt dimensions
-    for key in modelsGNN.keys():
-        modelsGNN[key].load(label = 'Last')
-
-        with torch.no_grad():
-            # Process the samples
-            if 'singleNodeForward' in dir(modelsGNN[key].archit):
-                if 'getLabelID' in dir(data):
-                    targetIDs = data.getLabelID('test')
-                    yHatTest = modelsGNN[key].archit\
-                                     .singleNodeForward(xTest, targetIDs)
-            else:
-                yHatTest = modelsGNN[key].archit(xTest)
-            # yHatTest is of shape
-            #   testSize x numberOfClasses
-            # We compute the accuracy
-            thisAccLast = data.evaluate(yHatTest, yTest)
-
+        costBest[modelName][split] = thisCostBest
+        costLast[modelName][split] = thisCostLast
+        # This is so that we can later compute a total accuracy with
+        # the corresponding error.
+        
         if doPrint:
-            print("%s: %6.4f" % (key, thisAccLast), flush = True)
-
-        # Save values:
-        writeVarValues(varsFile,
-                   {'accLast%s' % key: thisAccLast})
-        # And repeat for the last model:
-        for thisModel in modelList:
-            if thisModel in key:
-                accLast[thisModel][split] = thisAccLast.item()
-
-        del yHatTest
-        del thisAccLast
-    
-    del yTest
-    del xTest
+            print("\t%s: %.4f [Best] %.4f [Last]" % (thisModel, thisCostBest,
+                                                     thisCostLast))
 
 ############################
 # FINAL EVALUATION RESULTS #
@@ -763,40 +803,52 @@ for split in range(nDataSplits):
 # Now that we have computed the accuracy of all runs, we can obtain a final
 # result (mean and standard deviation)
 
-meanAccBest = {} # Mean across data splits
-meanAccLast = {} # Mean across data splits
-stdDevAccBest = {} # Standard deviation across data splits
-stdDevAccLast = {} # Standard deviation across data splits
+meanCostBest = {} # Mean across data splits
+meanCostLast = {} # Mean across data splits
+stdDevCostBest = {} # Standard deviation across data splits
+stdDevCostLast = {} # Standard deviation across data splits
 
 if doPrint:
     print("\nFinal evaluations (%02d data splits)" % (nDataSplits))
 
 for thisModel in modelList:
     # Convert the lists into a nDataSplits vector
-    accBest[thisModel] = np.array(accBest[thisModel])
-    accLast[thisModel] = np.array(accLast[thisModel])
+    costBest[thisModel] = np.array(costBest[thisModel])
+    costLast[thisModel] = np.array(costLast[thisModel])
 
     # And now compute the statistics (across graphs)
-    meanAccBest[thisModel] = np.mean(accBest[thisModel])
-    meanAccLast[thisModel] = np.mean(accLast[thisModel])
-    stdDevAccBest[thisModel] = np.std(accBest[thisModel])
-    stdDevAccLast[thisModel] = np.std(accLast[thisModel])
+    meanCostBest[thisModel] = np.mean(costBest[thisModel])
+    meanCostLast[thisModel] = np.mean(costLast[thisModel])
+    stdDevCostBest[thisModel] = np.std(costBest[thisModel])
+    stdDevCostLast[thisModel] = np.std(costLast[thisModel])
 
     # And print it:
     if doPrint:
         print("\t%s: %6.4f (+-%6.4f) [Best] %6.4f (+-%6.4f) [Last]" % (
                 thisModel,
-                meanAccBest[thisModel],
-                stdDevAccBest[thisModel],
-                meanAccLast[thisModel],
-                stdDevAccLast[thisModel]))
+                meanCostBest[thisModel],
+                stdDevCostBest[thisModel],
+                meanCostLast[thisModel],
+                stdDevCostLast[thisModel]))
 
     # Save values
     writeVarValues(varsFile,
-               {'meanAccBest%s' % thisModel: meanAccBest[thisModel],
-                'stdDevAccBest%s' % thisModel: stdDevAccBest[thisModel],
-                'meanAccLast%s' % thisModel: meanAccLast[thisModel],
-                'stdDevAccLast%s' % thisModel : stdDevAccLast[thisModel]})
+               {'meanCostBest%s' % thisModel: meanCostBest[thisModel],
+                'stdDevCostBest%s' % thisModel: stdDevCostBest[thisModel],
+                'meanCostLast%s' % thisModel: meanCostLast[thisModel],
+                'stdDevCostLast%s' % thisModel : stdDevCostLast[thisModel]})
+    
+# Save the printed info into the .txt file as well
+with open(varsFile, 'a+') as file:
+    file.write("Final evaluations (%02d data splits)\n" % (nDataSplits))
+    for thisModel in modelList:
+        file.write("\t%s: %6.4f (+-%6.4f) [Best] %6.4f (+-%6.4f) [Last]\n" % (
+                   thisModel,
+                   meanCostBest[thisModel],
+                   stdDevCostBest[thisModel],
+                   meanCostLast[thisModel],
+                   stdDevCostLast[thisModel]))
+    file.write('\n')
 
 #%%##################################################################
 #                                                                   #
@@ -811,104 +863,42 @@ if doFigs and doSaveVars:
     ###################
     # DATA PROCESSING #
     ###################
-
-    # Again, we have training and validation metrics (loss and accuracy
-    # -evaluation-) for many runs, so we need to carefully load them and compute
-    # the relevant statistics from these realizations.
-
-    #\\\ SAVE SPACE:
-    # Create the variables to save all the realizations. This is, again, a
-    # dictionary, where each key represents a model, and each model is a list
-    # for each data split.
-    # Each data split, in this case, is not a scalar, but a vector of
-    # length the number of training steps (or of validation steps)
-    lossTrain = {}
-    evalTrain = {}
-    lossValid = {}
-    evalValid = {}
-    # Initialize the splits dimension
-    for thisModel in modelList:
-        lossTrain[thisModel] = [None] * nDataSplits
-        evalTrain[thisModel] = [None] * nDataSplits
-        lossValid[thisModel] = [None] * nDataSplits
-        evalValid[thisModel] = [None] * nDataSplits
-
+    
     #\\\ FIGURES DIRECTORY:
     saveDirFigs = os.path.join(saveDir,'figs')
     # If it doesn't exist, create it.
     if not os.path.exists(saveDirFigs):
         os.makedirs(saveDirFigs)
 
-    #\\\ LOAD DATA:
-    # Path where the saved training variables should be
-    pathToTrainVars = os.path.join(saveDir,'trainVars')
-    # Get all the training files:
-    allTrainFiles = next(os.walk(pathToTrainVars))[2]
-    # Go over each of them (this can't be empty since we are also checking for
-    # doSaveVars to be true, what guarantees that the variables have been
-    # saved.)
-    for file in allTrainFiles:
-        # Check that it is a pickle file
-        if '.pkl' in file:
-            # Open the file
-            with open(os.path.join(pathToTrainVars,file),'rb') as fileTrainVars:
-                # Load it
-                thisVarsDict = pickle.load(fileTrainVars)
-                # store them
-                nBatches = thisVarsDict['nBatches']
-                thisLossTrain = thisVarsDict['lossTrain']
-                thisEvalTrain = thisVarsDict['evalTrain']
-                thisLossValid = thisVarsDict['lossValid']
-                thisEvalValid = thisVarsDict['evalValid']
-                # This graph is, actually, the data split dimension
-                if 'graphNo' in thisVarsDict.keys():
-                    thisG = thisVarsDict['graphNo']
-                else:
-                    thisG = 0
-                # And add them to the corresponding variables
-                for key in thisLossTrain.keys():
-                # This part matches each data realization (matched through
-                # the graphNo key) with each specific model.
-                    for thisModel in modelList:
-                        if thisModel in key:
-                            lossTrain[thisModel][thisG] = thisLossTrain[key]
-                            evalTrain[thisModel][thisG] = thisEvalTrain[key]
-                            lossValid[thisModel][thisG] = thisLossValid[key]
-                            evalValid[thisModel][thisG] = thisEvalValid[key]
-    # Now that we have collected all the results, we have that each of the four
-    # variables (lossTrain, evalTrain, lossValid, evalValid) has a list for
-    # each key in the dictionary. This list goes through the data split.
-    # Each split realization is actually an np.array.
-
     #\\\ COMPUTE STATISTICS:
     # The first thing to do is to transform those into a matrix with all the
     # realizations, so create the variables to save that.
     meanLossTrain = {}
-    meanEvalTrain = {}
+    meanCostTrain = {}
     meanLossValid = {}
-    meanEvalValid = {}
+    meanCostValid = {}
     stdDevLossTrain = {}
-    stdDevEvalTrain = {}
+    stdDevCostTrain = {}
     stdDevLossValid = {}
-    stdDevEvalValid = {}
+    stdDevCostValid = {}
     # Initialize the variables
     for thisModel in modelList:
         # Transform into np.array
         lossTrain[thisModel] = np.array(lossTrain[thisModel])
-        evalTrain[thisModel] = np.array(evalTrain[thisModel])
+        costTrain[thisModel] = np.array(costTrain[thisModel])
         lossValid[thisModel] = np.array(lossValid[thisModel])
-        evalValid[thisModel] = np.array(evalValid[thisModel])
+        costValid[thisModel] = np.array(costValid[thisModel])
         # Each of one of these variables should be of shape
         # nDataSplits x numberOfTrainingSteps
         # And compute the statistics
         meanLossTrain[thisModel] = np.mean(lossTrain[thisModel], axis = 0)
-        meanEvalTrain[thisModel] = np.mean(evalTrain[thisModel], axis = 0)
+        meanCostTrain[thisModel] = np.mean(costTrain[thisModel], axis = 0)
         meanLossValid[thisModel] = np.mean(lossValid[thisModel], axis = 0)
-        meanEvalValid[thisModel] = np.mean(evalValid[thisModel], axis = 0)
+        meanCostValid[thisModel] = np.mean(costValid[thisModel], axis = 0)
         stdDevLossTrain[thisModel] = np.std(lossTrain[thisModel], axis = 0)
-        stdDevEvalTrain[thisModel] = np.std(evalTrain[thisModel], axis = 0)
+        stdDevCostTrain[thisModel] = np.std(costTrain[thisModel], axis = 0)
         stdDevLossValid[thisModel] = np.std(lossValid[thisModel], axis = 0)
-        stdDevEvalValid[thisModel] = np.std(evalValid[thisModel], axis = 0)
+        stdDevCostValid[thisModel] = np.std(costValid[thisModel], axis = 0)
 
     ####################
     # SAVE FIGURE DATA #
@@ -923,12 +913,12 @@ if doFigs and doSaveVars:
     varsPickle['nBatches'] = nBatches
     varsPickle['meanLossTrain'] = meanLossTrain
     varsPickle['stdDevLossTrain'] = stdDevLossTrain
-    varsPickle['meanEvalTrain'] = meanEvalTrain
-    varsPickle['stdDevEvalTrain'] = stdDevEvalTrain
+    varsPickle['meanCostTrain'] = meanCostTrain
+    varsPickle['stdDevCostTrain'] = stdDevCostTrain
     varsPickle['meanLossValid'] = meanLossValid
     varsPickle['stdDevLossValid'] = stdDevLossValid
-    varsPickle['meanEvalValid'] = meanEvalValid
-    varsPickle['stdDevEvalValid'] = stdDevEvalValid
+    varsPickle['meanCostValid'] = meanCostValid
+    varsPickle['stdDevCostValid'] = stdDevCostValid
     with open(os.path.join(saveDirFigs,'figVars.pkl'), 'wb') as figVarsFile:
         pickle.dump(varsPickle, figVarsFile)
         
@@ -953,9 +943,9 @@ if doFigs and doSaveVars:
                                                     [selectSamplesTrain]
             stdDevLossTrain[thisModel] = stdDevLossTrain[thisModel]\
                                                         [selectSamplesTrain]
-            meanEvalTrain[thisModel] = meanEvalTrain[thisModel]\
+            meanCostTrain[thisModel] = meanCostTrain[thisModel]\
                                                     [selectSamplesTrain]
-            stdDevEvalTrain[thisModel] = stdDevEvalTrain[thisModel]\
+            stdDevCostTrain[thisModel] = stdDevCostTrain[thisModel]\
                                                         [selectSamplesTrain]
     # And same for the validation, if necessary.
     if xAxisMultiplierValid > 1:
@@ -966,9 +956,9 @@ if doFigs and doSaveVars:
                                                     [selectSamplesValid]
             stdDevLossValid[thisModel] = stdDevLossValid[thisModel]\
                                                         [selectSamplesValid]
-            meanEvalValid[thisModel] = meanEvalValid[thisModel]\
+            meanCostValid[thisModel] = meanCostValid[thisModel]\
                                                     [selectSamplesValid]
-            stdDevEvalValid[thisModel] = stdDevEvalValid[thisModel]\
+            stdDevCostValid[thisModel] = stdDevCostValid[thisModel]\
                                                         [selectSamplesValid]
 
     #\\\ LOSS (Training and validation) for EACH MODEL
@@ -988,19 +978,19 @@ if doFigs and doSaveVars:
                         bbox_inches = 'tight')
 
     #\\\ RMSE (Training and validation) for EACH MODEL
-    for key in meanEvalTrain.keys():
-        accFig = plt.figure(figsize=(1.61*figSize, 1*figSize))
-        plt.errorbar(xTrain, meanEvalTrain[key], yerr = stdDevEvalTrain[key],
+    for key in meanCostTrain.keys():
+        costFig = plt.figure(figsize=(1.61*figSize, 1*figSize))
+        plt.errorbar(xTrain, meanCostTrain[key], yerr = stdDevCostTrain[key],
                      color = '#01256E', linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
-        plt.errorbar(xValid, meanEvalValid[key], yerr = stdDevEvalValid[key],
+        plt.errorbar(xValid, meanCostValid[key], yerr = stdDevCostValid[key],
                      color = '#95001A', linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
         plt.ylabel(r'RMSE')
         plt.xlabel(r'Training steps')
         plt.legend([r'Training', r'Validation'])
         plt.title(r'%s' % key)
-        accFig.savefig(os.path.join(saveDirFigs,'eval%s.pdf' % key),
+        costFig.savefig(os.path.join(saveDirFigs,'cost%s.pdf' % key),
                         bbox_inches = 'tight')
 
     # LOSS (training) for ALL MODELS
@@ -1016,13 +1006,40 @@ if doFigs and doSaveVars:
                     bbox_inches = 'tight')
 
     # RMSE (validation) for ALL MODELS
-    allEvalValid = plt.figure(figsize=(1.61*figSize, 1*figSize))
-    for key in meanEvalValid.keys():
-        plt.errorbar(xValid, meanEvalValid[key], yerr = stdDevEvalValid[key],
+    allCostValidFig = plt.figure(figsize=(1.61*figSize, 1*figSize))
+    for key in meanCostValid.keys():
+        plt.errorbar(xValid, meanCostValid[key], yerr = stdDevCostValid[key],
                      linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
     plt.ylabel(r'RMSE')
     plt.xlabel(r'Training steps')
-    plt.legend(list(meanEvalValid.keys()))
-    allEvalValid.savefig(os.path.join(saveDirFigs,'allEvalValid.pdf'),
+    plt.legend(list(meanCostValid.keys()))
+    allCostValidFig.savefig(os.path.join(saveDirFigs,'allCostValid.pdf'),
                     bbox_inches = 'tight')
+
+# Finish measuring time
+endRunTime = datetime.datetime.now()
+
+totalRunTime = abs(endRunTime - startRunTime)
+totalRunTimeH = int(divmod(totalRunTime.total_seconds(), 3600)[0])
+totalRunTimeM, totalRunTimeS = \
+               divmod(totalRunTime.total_seconds() - totalRunTimeH * 3600., 60)
+totalRunTimeM = int(totalRunTimeM)
+
+if doPrint:
+    print(" ")
+    print("Simulation started: %s" %startRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    print("Simulation ended:   %s" % endRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    print("Total time: %dh %dm %.2fs" % (totalRunTimeH,
+                                         totalRunTimeM,
+                                         totalRunTimeS))
+    
+# And save this info into the .txt file as well
+with open(varsFile, 'a+') as file:
+    file.write("Simulation started: %s\n" % 
+                                     startRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    file.write("Simulation ended:   %s\n" % 
+                                       endRunTime.strftime("%Y/%m/%d %H:%M:%S"))
+    file.write("Total time: %dh %dm %.2fs" % (totalRunTimeH,
+                                              totalRunTimeM,
+                                              totalRunTimeS))
