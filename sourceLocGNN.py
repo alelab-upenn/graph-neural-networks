@@ -42,18 +42,18 @@ import torch.nn as nn
 import torch.optim as optim
 
 #\\\ Own libraries:
-import Utils.graphTools as graphTools
-import Utils.dataTools
-import Utils.graphML as gml
-import Modules.architectures as archit
-import Modules.model as model
-import Modules.training as training
-import Modules.evaluation as evaluation
-import Modules.loss as loss
+import alegnn.utils.graphTools as graphTools
+import alegnn.utils.dataTools
+import alegnn.utils.graphML as gml
+import alegnn.modules.architectures as archit
+import alegnn.modules.model as model
+import alegnn.modules.training as training
+import alegnn.modules.evaluation as evaluation
+import alegnn.modules.loss as loss
 
 #\\\ Separate functions:
-from Utils.miscTools import writeVarValues
-from Utils.miscTools import saveSeed
+from alegnn.utils.miscTools import writeVarValues
+from alegnn.utils.miscTools import saveSeed
 
 # Start measuring time
 startRunTime = datetime.datetime.now()
@@ -480,7 +480,7 @@ if doPrint:
 
 #\\\ Logging options
 if doLogging:
-    from Utils.visualTools import Visualizer
+    from alegnn.utils.visualTools import Visualizer
     logsTB = os.path.join(saveDir, 'logsTB')
     logger = Visualizer(logsTB, name='visualResults')
     
@@ -565,7 +565,7 @@ if graphType == 'FacebookEgo':
         print("Load data...", flush = True, end = ' ')
 
     # Create graph
-    facebookData = Utils.dataTools.FacebookEgo(dataDir, use234)
+    facebookData = alegnn.utils.dataTools.FacebookEgo(dataDir, use234)
     adjacencyMatrix = facebookData.getAdjacencyMatrix(use234)
     assert adjacencyMatrix is not None
     nNodes = adjacencyMatrix.shape[0]
@@ -674,8 +674,8 @@ for graph in range(nGraphRealizations):
 
         #   Now that we have the list of nodes we are using as sources, then we
         #   can go ahead and generate the datasets.
-        data = Utils.dataTools.SourceLocalization(G, nTrain, nValid, nTest,
-                                                  sourceNodes, tMax = tMax)
+        data = alegnn.utils.dataTools.SourceLocalization(G, nTrain, nValid, nTest,
+                                                         sourceNodes, tMax = tMax)
         data.astype(torch.float64)
         #data.to(device)
         data.expandDims() # Data are just graph signals, but the architectures 
@@ -746,7 +746,7 @@ for graph in range(nGraphRealizations):
             # normalized adjacency
             if 'crs' in thisModel:
                 L = graphTools.normalizeLaplacian(G.L)
-                EL, VL = graphTools.computeGFT(L, order = 'increasing')
+                EL, VL = graphTools.computeGFT(L, order ='increasing')
                 S = 2*L/np.max(np.real(EL)) - np.eye(nNodes)
             else:
                 S = G.S.copy()/np.max(np.real(G.E))

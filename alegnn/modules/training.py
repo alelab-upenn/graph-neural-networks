@@ -24,7 +24,7 @@ import os
 import pickle
 import datetime
 
-from Utils.dataTools import invertTensorEW
+from alegnn.utils.dataTools import invertTensorEW
 
 class Trainer:
     """
@@ -148,7 +148,7 @@ class Trainer:
             realizationNo = -1
 
         if doLogging:
-            from Utils.visualTools import Visualizer
+            from alegnn.utils.visualTools import Visualizer
             logsTB = os.path.join(self.saveDir, self.name + '-logsTB')
             logger = Visualizer(logsTB, name='visualResults')
         else:

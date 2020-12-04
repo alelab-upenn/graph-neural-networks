@@ -48,16 +48,16 @@ import torch.nn as nn
 import torch.optim as optim
 
 #\\\ Own libraries:
-import Utils.dataTools as dataTools
-import Utils.graphML as gml
-import Modules.architecturesTime as architTime
-import Modules.model as model
-import Modules.training as training
-import Modules.evaluation as evaluation
+import alegnn.utils.dataTools as dataTools
+import alegnn.utils.graphML as gml
+import alegnn.modules.architecturesTime as architTime
+import alegnn.modules.model as model
+import alegnn.modules.training as training
+import alegnn.modules.evaluation as evaluation
 
 #\\\ Separate functions:
-from Utils.miscTools import writeVarValues
-from Utils.miscTools import saveSeed
+from alegnn.utils.miscTools import writeVarValues
+from alegnn.utils.miscTools import saveSeed
 
 # Start measuring time
 startRunTime = datetime.datetime.now()
@@ -450,7 +450,7 @@ if doPrint:
 #\\\ Logging options
 if doLogging:
     # If logging is on, load the tensorboard visualizer and initialize it
-    from Utils.visualTools import Visualizer
+    from alegnn.utils.visualTools import Visualizer
     logsTB = os.path.join(saveDir, 'logsTB')
     logger = Visualizer(logsTB, name='visualResults')
     

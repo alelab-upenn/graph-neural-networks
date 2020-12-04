@@ -48,18 +48,18 @@ import torch.nn as nn
 import torch.optim as optim
 
 #\\\ Own libraries:
-import Utils.graphTools as graphTools
-import Utils.dataTools
-import Utils.graphML as gml
-import Modules.architectures as archit
-import Modules.model as model
-import Modules.training as training
-import Modules.evaluation as evaluation
-import Modules.loss as loss
+import alegnn.utils.graphTools as graphTools
+import alegnn.utils.dataTools
+import alegnn.utils.graphML as gml
+import alegnn.modules.architectures as archit
+import alegnn.modules.model as model
+import alegnn.modules.training as training
+import alegnn.modules.evaluation as evaluation
+import alegnn.modules.loss as loss
 
 #\\\ Separate functions:
-from Utils.miscTools import writeVarValues
-from Utils.miscTools import saveSeed
+from alegnn.utils.miscTools import writeVarValues
+from alegnn.utils.miscTools import saveSeed
 
 # Start measuring time
 startRunTime = datetime.datetime.now()
@@ -376,7 +376,7 @@ if doPrint:
 #\\\ Logging options
 if doLogging:
     # If logging is on, load the tensorboard visualizer and initialize it
-    from Utils.visualTools import Visualizer
+    from alegnn.utils.visualTools import Visualizer
     logsTB = os.path.join(saveDir, 'logsTB')
     logger = Visualizer(logsTB, name='visualResults')
 
@@ -466,14 +466,14 @@ for split in range(nDataSplits):
         print("...", end = ' ', flush = True)
 
     #   Load the data, which will give a specific split
-    data = Utils.dataTools.Authorship(authorName,
-                                      ratioTrain,
-                                      ratioValid,
-                                      dataPath,
-                                      graphNormalizationType,
-                                      keepIsolatedNodes,
-                                      forceUndirected,
-                                      forceConnected)
+    data = alegnn.utils.dataTools.Authorship(authorName,
+                                             ratioTrain,
+                                             ratioValid,
+                                             dataPath,
+                                             graphNormalizationType,
+                                             keepIsolatedNodes,
+                                             forceUndirected,
+                                             forceConnected)
     
     if doPrint:
         print("OK")
@@ -487,7 +487,7 @@ for split in range(nDataSplits):
 
     # Create graph
     adjacencyMatrix = data.getGraph()
-    G = graphTools.Graph('adjacency', adjacencyMatrix.shape[0], 
+    G = graphTools.Graph('adjacency', adjacencyMatrix.shape[0],
                          {'adjacencyMatrix': adjacencyMatrix})
     G.computeGFT() # Compute the GFT of the stored GSO
 
