@@ -36,10 +36,10 @@ import scipy
 import torch
 import torch.nn as nn
 
-import Utils.graphML as gml
-import Utils.graphTools
+import alegnn.utils.graphML as gml
+import alegnn.utils.graphTools
 
-from Utils.dataTools import changeDataType
+from alegnn.utils.dataTools import changeDataType
 
 zeroTolerance = 1e-9 # Absolute values below this number are considered zero.
 
@@ -206,7 +206,7 @@ class SelectionGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
      
@@ -219,11 +219,11 @@ class SelectionGNN(nn.Module):
         # will default to selection sampling (therefore, always specify
         # nSelectedNodes)
         if self.coarsening and self.E == 1:
-            self.permFunction = Utils.graphTools.permCoarsening # Override
+            self.permFunction = alegnn.utils.graphTools.permCoarsening # Override
                 # permutation function for the one corresponding to coarsening
             GSO = scipy.sparse.csr_matrix(GSO[0])
-            GSO, self.order = Utils.graphTools.coarsen(GSO, levels=self.L,
-                                                       self_connections=False)
+            GSO, self.order = alegnn.utils.graphTools.coarsen(GSO, levels=self.L,
+                                                              self_connections=False)
             # Now, GSO is a list of csr_matrix with self.L+1 coarsened GSOs,
             # we need to torch.tensor them and put them in a list.
             # order is just a list of indices to reorder the nodes.
@@ -386,8 +386,8 @@ class SelectionGNN(nn.Module):
         if self.coarsening and self.E == 1:
             device = self.S[0].device
             GSO = scipy.sparse.csr_matrix(GSO[0])
-            GSO, self.order = Utils.graphTools.coarsen(GSO, levels=self.L,
-                                                       self_connections=False)
+            GSO, self.order = alegnn.utils.graphTools.coarsen(GSO, levels=self.L,
+                                                              self_connections=False)
             # Now, GSO is a list of csr_matrix with self.L+1 coarsened GSOs,
             # we need to torch.tensor them and put them in a list.
             # order is just a list of indices to reorder the nodes.
@@ -426,7 +426,7 @@ class SelectionGNN(nn.Module):
         if x.shape[2] != self.N[0] and self.coarsening:
             thisDevice = x.device # Save the device we where operating on
             x = x.cpu().numpy() # Convert to numpy
-            x = Utils.graphTools.permCoarsening(x, self.order) 
+            x = alegnn.utils.graphTools.permCoarsening(x, self.order)
                 # Re order and add dummy values
             x = torch.tensor(x).to(thisDevice)
         else:
@@ -631,7 +631,7 @@ class LocalActivationGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
      
@@ -961,7 +961,7 @@ class LocalGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -1316,7 +1316,7 @@ class SpectralGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -1618,7 +1618,7 @@ class NodeVariantGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -1854,7 +1854,7 @@ class EdgeVariantGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -2088,7 +2088,7 @@ class LocalEdgeNet(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -2390,7 +2390,7 @@ class ARMAfilterGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -2702,7 +2702,7 @@ class LocalARMA(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -3032,7 +3032,7 @@ class AggregationGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         GSO, self.order = self.permFunction(GSO)
@@ -3408,7 +3408,7 @@ class MultiNodeAggregationGNN(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         GSO, self.order = self.permFunction(GSO)
@@ -3685,7 +3685,7 @@ class GraphAttentionNetwork(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -3935,7 +3935,7 @@ class GraphConvolutionAttentionNetwork(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)
@@ -4204,7 +4204,7 @@ class EdgeVariantAttention(nn.Module):
             # is available in the Utils.graphTools module.
             self.permFunction = eval('Utils.graphTools.perm' + order)
         else:
-            self.permFunction = Utils.graphTools.permIdentity
+            self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
             # function is native to that pooling method.
         self.S, self.order = self.permFunction(GSO)

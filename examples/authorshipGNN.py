@@ -1,15 +1,18 @@
-# 2019/04/10~
+# 2019/04/08~
 # Fernando Gama, fgama@seas.upenn.edu
 # Luana Ruiz, rubruiz@seas.upenn.edu
 
-# Test a movie recommendation problem. The nodes are either items or users
-# and the edges are rating similarities estimated by a Pearson correlation
-# coefficient (either rating similarities between items or rating similarities
-# between users). The graph signal defined on top of this graph are the
-# ratings given to items by a specific user (if the nodes are items) or the
-# ratings given by the users to a specific item (if the nodes are users).
-# The objective is to estimate the rating on a target node(s), that is, an
-# interpolation problem of the graph signal at a target node(s).
+# Test the authorship attribution dataset. The dataset consists on word 
+# adjacency networks (graph support) and word frequency count of short texts
+# (graph signal) for a pool of authors of the 19th century. The word adjacency
+# networks are graphs whose nodes are function words and whose edges are 
+# measures of co-occurrence between these words. These graphs are different
+# for each author, but it takes long texts to produce them. In this problem,
+# we will use WANs already created, and try to attribute authorship of short
+# texts; we count the number of function words present in each short text,
+# assign them to the corresponding nodes of the WAN (i.e. graph signals), and
+# use those to classify texts. The classification is binary: each texts either
+# belongs to the author whose WAN we are using or does not.
 
 # Outputs:
 # - Text file with all the hyperparameters selected for the run and the 
@@ -45,18 +48,18 @@ import torch.nn as nn
 import torch.optim as optim
 
 #\\\ Own libraries:
-import Utils.graphTools as graphTools
-import Utils.dataTools
-import Utils.graphML as gml
-import Modules.architectures as archit
-import Modules.model as model
-import Modules.training as training
-import Modules.evaluation as evaluation
-import Modules.loss as loss
+import alegnn.utils.graphTools as graphTools
+import alegnn.utils.dataTools
+import alegnn.utils.graphML as gml
+import alegnn.modules.architectures as archit
+import alegnn.modules.model as model
+import alegnn.modules.training as training
+import alegnn.modules.evaluation as evaluation
+import alegnn.modules.loss as loss
 
 #\\\ Separate functions:
-from Utils.miscTools import writeVarValues
-from Utils.miscTools import saveSeed
+from alegnn.utils.miscTools import writeVarValues
+from alegnn.utils.miscTools import saveSeed
 
 # Start measuring time
 startRunTime = datetime.datetime.now()
@@ -67,31 +70,28 @@ startRunTime = datetime.datetime.now()
 #                                                                   #
 #####################################################################
 
-graphType = 'movie' # Graph type: 'user'-based or 'movie'-based
-labelID = [50] # Which node to focus on (either a list or the str 'all')
-# When 'movie': [1]: Toy Story, [50]: Star Wars, [258]: Contact,
-# [100]: Fargo, [181]: Return of the Jedi, [294]: Liar, liar
-if labelID == 'all':
-    labelIDstr = 'all'
-elif len(labelID) == 1:
-    labelIDstr = '%03d' % labelID[0]
-else:
-    labelIDstr = ['%03d_' % i for i in labelID]
-    labelIDstr = "".join(labelIDstr)
-    labelIDstr = labelIDstr[0:-1]
-thisFilename = 'movieGNN' # This is the general name of all related files
+authorName = 'austen'
+# jacob 'abbott',         robert louis 'stevenson',   louisa may 'alcott',
+# horatio 'alger',        james 'allen',              jane 'austen',
+# emily 'bronte',         james 'cooper',             charles 'dickens', 
+# hamlin 'garland',       nathaniel 'hawthorne',      henry 'james',
+# herman 'melville',      'page',                     henry 'thoreau',
+# mark 'twain',           arthur conan 'doyle',       washington 'irving',
+# edgar allan 'poe',      sarah orne 'jewett',        edith 'wharton'
+
+thisFilename = 'authorshipGNN' # This is the general name of all related files
 
 saveDirRoot = 'experiments' # In this case, relative location
-saveDir = os.path.join(saveDirRoot, thisFilename) # Dir where to save all
-    # the results from each run
-dataDir = os.path.join('datasets','movielens')
+saveDir = os.path.join(saveDirRoot, thisFilename + '-' + authorName) 
+    # Dir where to save all the results from each run
+dataPath = os.path.join('datasets','authorshipData','authorshipData.mat')
 
 #\\\ Create .txt to store the values of the setting parameters for easier
 # reference when running multiple experiments
 today = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 # Append date and time of the run to the directory, to avoid several runs of
 # overwritting each other.
-saveDir = saveDir + '-' + graphType + '-' + labelIDstr + '-' + today
+saveDir = saveDir + '-' + today
 # Create directory 
 if not os.path.exists(saveDir):
     os.makedirs(saveDir)
@@ -125,52 +125,40 @@ saveSeed(randomStates, saveDir)
 
 useGPU = True # If true, and GPU is available, use it.
 
-ratioTrain = 0.9 # Ratio of training samples
-ratioValid = 0.1 # Ratio of validation samples (out of the total training
+nClasses = 2 # Either authorName or not
+ratioTrain = 0.95 # Ratio of training samples
+ratioValid = 0.08 # Ratio of validation samples (out of the total training
 # samples)
 # Final split is:
 #   nValidation = round(ratioValid * ratioTrain * nTotal)
 #   nTrain = round((1 - ratioValid) * ratioTrain * nTotal)
 #   nTest = nTotal - nTrain - nValidation
-maxNodes = None # Maximum number of nodes (select the ones with the largest
-#   number of ratings)
-minRatings = 0 # Discard samples (rows and columns) with less than minRatings 
-    # ratings
-interpolateRatings = False # Interpolate ratings with nearest-neighbors rule
-    # before feeding them into the GNN
 
 nDataSplits = 10 # Number of data realizations
 # Obs.: The built graph depends on the split between training, validation and
 # testing. Therefore, we will run several of these splits and average across
 # them, to obtain some result that is more robust to this split.
-    
-# Given that we build the graph from a training split selected at random, it
-# could happen that it is disconnected, or directed, or what not. In other 
-# words, we might want to force (by removing nodes) some useful characteristics
-# on the graph
-keepIsolatedNodes = True # If True keeps isolated nodes ---> FALSE
-forceUndirected = True # If True forces the graph to be undirected
-forceConnected = False # If True returns the largest connected component of the
-    # graph as the main graph ---> TRUE
-kNN = 10 # Number of nearest neighbors
 
-maxDataPoints = None # None to consider all data points
+# Every training excerpt has a WAN associated to it. We combine all these WANs
+# into a single graph to use as the supporting graph for all samples. This
+# combination happens under some extra options:
+graphNormalizationType = 'rows' # or 'cols' - Makes all rows add up to 1.
+keepIsolatedNodes = False # If True keeps isolated nodes
+forceUndirected = True # If True forces the graph to be undirected (symmetrizes)
+forceConnected = True # If True removes nodes (from lowest to highest degree)
+    # until the resulting graph is connected.
 
 #\\\ Save values:
 writeVarValues(varsFile,
-               {'labelID': labelID,
-                'graphType': graphType,
+               {'authorName': authorName,
+                'nClasses': nClasses,
                 'ratioTrain': ratioTrain,
                 'ratioValid': ratioValid,
-                'maxNodes': maxNodes,
-                'minRatings': minRatings,
-                'interpolateRatings': interpolateRatings,
                 'nDataSplits': nDataSplits,
+                'graphNormalizationType': graphNormalizationType,
                 'keepIsolatedNodes': keepIsolatedNodes,
                 'forceUndirected': forceUndirected,
                 'forceConnected': forceConnected,
-                'kNN': kNN,
-                'maxDataPoints': maxDataPoints,
                 'useGPU': useGPU})
 
 ############
@@ -184,11 +172,12 @@ beta1 = 0.9 # beta1 if 'ADAM', alpha if 'RMSprop'
 beta2 = 0.999 # ADAM option only
 
 #\\\ Loss function choice
-lossFunction = nn.SmoothL1Loss
+lossFunction = nn.CrossEntropyLoss # This applies a softmax before feeding
+    # it into the NLL, so we don't have to apply the softmax ourselves.
 
 #\\\ Overall training options
-nEpochs = 40 # Number of epochs
-batchSize = 5 # Batch size
+nEpochs = 25 # Number of epochs
+batchSize = 20 # Batch size
 doLearningRateDecay = False # Learning rate decay
 learningRateDecayRate = 0.9 # Rate
 learningRateDecayPeriod = 1 # How many epochs after which update the lr
@@ -199,7 +188,6 @@ writeVarValues(varsFile,
                {'optimAlg': optimAlg,
                 'learningRate': learningRate,
                 'beta1': beta1,
-                'beta2': beta2,
                 'lossFunction': lossFunction,
                 'nEpochs': nEpochs,
                 'batchSize': batchSize,
@@ -212,17 +200,11 @@ writeVarValues(varsFile,
 # ARCHITECTURES #
 #################
 
-# Just four architecture one- and two-layered Selection and Local GNN. The main
-# difference is that the Local GNN is entirely local (i.e. the output is given
-# by a linear combination of the features at a single node, instead of a final
-# MLP layer combining the features at all nodes).
+# Here, there will be three one-layer architectures
     
-# Select desired architectures
-doSelectionGNN = True
-doLocalGNN = True
-
-do1Layer = True
-do2Layers = True
+doLocalMax = True
+doLocalMed = True
+doPointwse = True
 
 # In this section, we determine the (hyper)parameters of models that we are
 # going to train. This only sets the parameters. The architectures need to be
@@ -244,147 +226,101 @@ modelList = []
 #\\\ SELECTION GNN \\\
 #\\\\\\\\\\\\\\\\\\\\\
 
-if doSelectionGNN:
+# Hyperparameters to be shared by all architectures
+    
+modelActvFn = {}
 
-    #\\\ Basic parameters for all the Selection GNN architectures
+modelActvFn['name'] = 'ActvFn' # To be modified later on depending on the
+    # specific ordering selected
+modelActvFn['device'] = 'cuda:0' if (useGPU and torch.cuda.is_available()) \
+                                 else 'cpu'
+                                 
+#\\\ ARCHITECTURE
     
-    modelSelGNN = {} # Model parameters for the Selection GNN (SelGNN)
-    modelSelGNN['name'] = 'SelGNN'
-    modelSelGNN['device'] = 'cuda:0' if (useGPU and torch.cuda.is_available()) \
-                                     else 'cpu'
+# Select architectural nn.Module to use
+modelActvFn['archit'] = archit.LocalActivationGNN
+# Graph convolutional layers
+modelActvFn['dimNodeSignals'] = [1, 32] # Number of features per layer
+modelActvFn['nFilterTaps'] = [5] # Number of filter taps
+modelActvFn['bias'] = True # Include bias
+# Nonlinearity
+modelActvFn['nonlinearity'] = gml.NoActivation
+modelActvFn['kHopActivation'] =  [2]
+# Pooling
+modelActvFn['nSelectedNodes'] = None # To be determined later
+modelActvFn['poolingFunction'] = gml.NoPool # Summarizing function
+modelActvFn['poolingSize'] = [1] # Summarizing neighborhoods
+# Readout layer
+modelActvFn['dimLayersMLP'] = [nClasses]
+# Graph Structure
+modelActvFn['GSO'] = None # To be determined later on, based on data
+modelActvFn['order'] = None # Not used because there is no pooling
+
+#\\\ TRAINER
+
+modelActvFn['trainer'] = training.Trainer
+
+#\\\ EVALUATOR
+
+modelActvFn['evaluator'] = evaluation.evaluate
+
+#\\\\\\\\\\\\
+#\\\ MODEL 1: Max Local Activation
+#\\\\\\\\\\\\
+
+if doLocalMax:
     
-    #\\\ ARCHITECTURE
+    #\\\ Basic parameters for all the Aggregation GNN architectures
     
-    # Chosen architecture
-    modelSelGNN['archit'] = archit.SelectionGNN
-    # Graph convolutional parameters
-    modelSelGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
-    modelSelGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
-    modelSelGNN['bias'] = True # Decide whether to include a bias term
+    modelActvFnMax = deepcopy(modelActvFn)
+    
+    modelActvFnMax['name'] += 'Max'
     # Nonlinearity
-    modelSelGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
-    # Pooling
-    modelSelGNN['poolingFunction'] = gml.NoPool # Summarizing function
-    modelSelGNN['nSelectedNodes'] = None # To be determined later on
-    modelSelGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
-        # is affected by the summary
-    # Full MLP readout layer (this layer breaks the locality of the solution)
-    modelSelGNN['dimLayersMLP'] = [1] # Dimension of the fully connected
-        # layers after the GCN layers, we just need to output a single scalar
-    # Graph structure
-    modelSelGNN['GSO'] = None # To be determined later on, based on data
-    modelSelGNN['order'] = None # Not used because there is no pooling
+    modelActvFnMax['nonlinearity'] = gml.MaxLocalActivation
     
-    #\\\ TRAINER
-
-    modelSelGNN['trainer'] = training.Trainer
-    
-    #\\\ EVALUATOR
-    
-    modelSelGNN['evaluator'] = evaluation.evaluate
-    
-
-#\\\\\\\\\\\\
-#\\\ MODEL 1: Selection GNN with 1 less layer
-#\\\\\\\\\\\\
-
-    modelSelGNN1Ly = deepcopy(modelSelGNN)
-
-    modelSelGNN1Ly['name'] += '1Ly' # Name of the architecture
-    
-    modelSelGNN1Ly['dimNodeSignals'] = modelSelGNN['dimNodeSignals'][0:-1]
-    modelSelGNN1Ly['nFilterTaps'] = modelSelGNN['nFilterTaps'][0:-1]
-    modelSelGNN1Ly['poolingSize'] = modelSelGNN['poolingSize'][0:-1]
-
     #\\\ Save Values:
-    writeVarValues(varsFile, modelSelGNN1Ly)
-    modelList += [modelSelGNN1Ly['name']]
+    writeVarValues(varsFile, modelActvFnMax)
+    modelList += [modelActvFnMax['name']]
     
 #\\\\\\\\\\\\
-#\\\ MODEL 2: Selection GNN with all Layers
+#\\\ MODEL 2: Median Local Activation
 #\\\\\\\\\\\\
 
-    modelSelGNN2Ly = deepcopy(modelSelGNN)
-
-    modelSelGNN2Ly['name'] += '2Ly' # Name of the architecture
-
-    #\\\ Save Values:
-    writeVarValues(varsFile, modelSelGNN2Ly)
-    modelList += [modelSelGNN2Ly['name']]
-
+if doLocalMed:
     
-#\\\\\\\\\\\\\\\\\
-#\\\ LOCAL GNN \\\
-#\\\\\\\\\\\\\\\\\
-
-if doLocalGNN:
-
-    #\\\ Basic parameters for all the Local GNN architectures
+    #\\\ Basic parameters for all the Aggregation GNN architectures
     
-    modelLclGNN = {} # Model parameters for the Local GNN (LclGNN)
-    modelLclGNN['name'] = 'LclGNN'
-    modelLclGNN['device'] = 'cuda:0' if (useGPU and torch.cuda.is_available()) \
-                                     else 'cpu'
+    modelActvFnMed = deepcopy(modelActvFn)
     
-    #\\\ ARCHITECTURE
-    
-    # Chosen architecture
-    modelLclGNN['archit'] = archit.LocalGNN
-    # Graph convolutional parameters
-    modelLclGNN['dimNodeSignals'] = [1, 64, 32] # Features per layer
-    modelLclGNN['nFilterTaps'] = [5, 5] # Number of filter taps per layer
-    modelLclGNN['bias'] = True # Decide whether to include a bias term
+    modelActvFnMed['name'] += 'Med'
     # Nonlinearity
-    modelLclGNN['nonlinearity'] = nn.ReLU # Selected nonlinearity
-    # Pooling
-    modelLclGNN['poolingFunction'] = gml.NoPool # Summarizing function
-    modelLclGNN['nSelectedNodes'] = None # To be determined later on
-    modelLclGNN['poolingSize'] = [1, 1] # poolingSize-hop neighborhood that
-        # is affected by the summary
-    # Readout layer: local linear combination of features
-    modelLclGNN['dimReadout'] = [1] # Dimension of the fully connected layers
-        # after the GCN layers (map); this fully connected layer is applied only
-        # at each node, without any further exchanges nor considering all nodes
-        # at once, making the architecture entirely local.
-    # Graph structure
-    modelLclGNN['GSO'] = None # To be determined later on, based on data
-    modelLclGNN['order'] = None # Not used because there is no pooling
+    modelActvFnMed['nonlinearity'] = gml.MedianLocalActivation
     
-    #\\\ TRAINER
-
-    modelLclGNN['trainer'] = training.TrainerSingleNode
-    
-    #\\\ EVALUATOR
-    
-    modelLclGNN['evaluator'] = evaluation.evaluateSingleNode
-
-#\\\\\\\\\\\\
-#\\\ MODEL 3: Local GNN with 1 less layer
-#\\\\\\\\\\\\
-
-    modelLclGNN1Ly = deepcopy(modelLclGNN)
-
-    modelLclGNN1Ly['name'] += '1Ly' # Name of the architecture
-    
-    modelLclGNN1Ly['dimNodeSignals'] = modelLclGNN['dimNodeSignals'][0:-1]
-    modelLclGNN1Ly['nFilterTaps'] = modelLclGNN['nFilterTaps'][0:-1]
-    modelLclGNN1Ly['poolingSize'] = modelLclGNN['poolingSize'][0:-1]
-
     #\\\ Save Values:
-    writeVarValues(varsFile, modelLclGNN1Ly)
-    modelList += [modelLclGNN1Ly['name']]
+    writeVarValues(varsFile, modelActvFnMed)
+    modelList += [modelActvFnMed['name']]
     
 #\\\\\\\\\\\\
-#\\\ MODEL 4: Local GNN with all Layers
+#\\\ MODEL 3: ReLU nonlinearity
 #\\\\\\\\\\\\
 
-    modelLclGNN2Ly = deepcopy(modelLclGNN)
-
-    modelLclGNN2Ly['name'] += '2Ly' # Name of the architecture
-
+if doPointwse:
+    
+    #\\\ Basic parameters for all the Aggregation GNN architectures
+    
+    modelActvFnPnt = deepcopy(modelActvFn)
+    
+    modelActvFnPnt['name'] += 'Pnt'
+    # Change the architecture
+    modelActvFnPnt['archit'] = archit.SelectionGNN
+    # Nonlinearity
+    modelActvFnPnt['nonlinearity'] = nn.ReLU
+    # Get rid of the parameter kHopActivation that we do not need anymore
+    modelActvFnPnt.pop('kHopActivation')
+    
     #\\\ Save Values:
-    writeVarValues(varsFile, modelLclGNN2Ly)
-    modelList += [modelLclGNN2Ly['name']]
+    writeVarValues(varsFile, modelActvFnPnt)
+    modelList += [modelActvFnPnt['name']]
 
 ###########
 # LOGGING #
@@ -398,9 +334,9 @@ doFigs = True # Plot some figures (this only works if doSaveVars is True)
 # Parameters:
 printInterval = 5 # After how many training steps, print the partial results
 #   0 means to never print partial results while training
-xAxisMultiplierTrain = 100 # How many training steps in between those shown in
+xAxisMultiplierTrain = 10 # How many training steps in between those shown in
     # the plot, i.e., one training step every xAxisMultiplierTrain is shown.
-xAxisMultiplierValid = 20 # How many validation steps in between those shown,
+xAxisMultiplierValid = 2 # How many validation steps in between those shown,
     # same as above.
 figSize = 5 # Overall size of the figure that contains the plot
 lineWidth = 2 # Width of the plot lines
@@ -440,7 +376,7 @@ if doPrint:
 #\\\ Logging options
 if doLogging:
     # If logging is on, load the tensorboard visualizer and initialize it
-    from Utils.visualTools import Visualizer
+    from alegnn.utils.visualTools import Visualizer
     logsTB = os.path.join(saveDir, 'logsTB')
     logger = Visualizer(logsTB, name='visualResults')
 
@@ -450,12 +386,12 @@ if doLogging:
 # dictionary determines the model, then the first list index determines
 # which split realization. Then, this will be converted to numpy to compute
 # mean and standard deviation (across the split dimension).
-costBest = {} # Cost for the best model (Evaluation cost: RMSE)
+costBest = {} # Cost for the best model (Evaluation cost: Error rate)
 costLast = {} # Cost for the last model
 for thisModel in modelList: # Create an element for each split realization,
     costBest[thisModel] = [None] * nDataSplits
     costLast[thisModel] = [None] * nDataSplits
-
+    
 if doFigs:
     #\\\ SAVE SPACE:
     # Create the variables to save all the realizations. This is, again, a
@@ -473,6 +409,7 @@ if doFigs:
         costTrain[thisModel] = [None] * nDataSplits
         lossValid[thisModel] = [None] * nDataSplits
         costValid[thisModel] = [None] * nDataSplits
+
 
 ####################
 # TRAINING OPTIONS #
@@ -523,26 +460,20 @@ for split in range(nDataSplits):
     ############
     
     if doPrint:
-        print("Loading data", end = '')
+        print("\nLoading data", end = '')
         if nDataSplits > 1:
             print(" for split %d" % (split+1), end = '')
         print("...", end = ' ', flush = True)
 
     #   Load the data, which will give a specific split
-    data = Utils.dataTools.MovieLens(graphType, # 'user' or 'movies'
-                                     labelID, # ID of node to interpolate
-                                     ratioTrain, # ratio of training samples
-                                     ratioValid, # ratio of validation samples
-                                     dataDir, # directory where dataset is
-                                     # Extra options
-                                     keepIsolatedNodes,
-                                     forceUndirected,
-                                     forceConnected,
-                                     kNN, # Number of nearest neighbors
-                                     maxNodes = maxNodes,
-                                     maxDataPoints = maxDataPoints,
-                                     minRatings = minRatings,
-                                     interpolate = interpolateRatings)
+    data = alegnn.utils.dataTools.Authorship(authorName,
+                                             ratioTrain,
+                                             ratioValid,
+                                             dataPath,
+                                             graphNormalizationType,
+                                             keepIsolatedNodes,
+                                             forceUndirected,
+                                             forceConnected)
     
     if doPrint:
         print("OK")
@@ -565,7 +496,7 @@ for split in range(nDataSplits):
     nNodes = G.N
 
     # Once data is completely formatted and in appropriate fashion, change its
-    # type to torch
+    # type to torch and move it to the appropriate device
     data.astype(torch.float64)
     # And the corresponding feature dimension that we will need to use
     data.expandDims() # Data are just graph signals, but the architectures 
@@ -585,7 +516,7 @@ for split in range(nDataSplits):
     # This is the dictionary where we store the models (in a model.Model
     # class, that is then passed to training).
     modelsGNN = {}
-
+        
     # If a new model is to be created, it should be called for here.
     
     if doPrint:
@@ -609,7 +540,7 @@ for split in range(nDataSplits):
         thisEvaluator = modelDict.pop('evaluator')
         
         # If more than one graph or data realization is going to be carried out,
-        # we are going to store all of thos models separately, so that any of
+        # we are going to store all of those models separately, so that any of
         # them can be brought back and studied in detail.
         if nDataSplits > 1:
             thisName += 'G%02d' % split
@@ -634,10 +565,7 @@ for split in range(nDataSplits):
         # Do not forget to add the GSO to the input parameters of the archit
         modelDict['GSO'] = S
         # Add the number of nodes for the no-pooling part
-        if '1Ly' in thisName:
-            modelDict['nSelectedNodes'] = [nNodes]
-        elif '2Ly' in thisName:
-            modelDict['nSelectedNodes'] = [nNodes, nNodes]
+        modelDict['nSelectedNodes'] = [nNodes]
         
         ################
         # ARCHITECTURE #
@@ -680,7 +608,7 @@ for split in range(nDataSplits):
                                    thisDevice,
                                    thisName,
                                    saveDir)
-
+        
         # Store it
         modelsGNN[thisName] = modelCreated
 
@@ -724,7 +652,7 @@ for split in range(nDataSplits):
         for m in modelList:
             if m in thisModel:
                 modelName = m
-        
+    
         # Identify the specific split number at training time
         if nDataSplits > 1:
             trainingOptsPerModel[modelName]['graphNo'] = split
@@ -753,14 +681,14 @@ for split in range(nDataSplits):
     #                                                                   #
     #####################################################################
 
-    # Now that the model has been trained, we evaluate them on the test
+    # Now that the models have been trained, we evaluate them on the test
     # samples.
 
     # We have two versions of each model to evaluate: the one obtained
     # at the best result of the validation step, and the last trained model.
 
     if doPrint:
-        print("Total testing RMSE", end = '', flush = True)
+        print("\nTotal testing error rate", end = '', flush = True)
         if nDataSplits > 1:
             print(" (Split %02d)" % split, end = '', flush = True)
         print(":", flush = True)
@@ -793,8 +721,9 @@ for split in range(nDataSplits):
         # the corresponding error.
         
         if doPrint:
-            print("\t%s: %.4f [Best] %.4f [Last]" % (thisModel, thisCostBest,
-                                                     thisCostLast))
+            print("\t%s: %6.2f%% [Best] %6.2f%% [Last]" % (thisModel,
+                                                           thisCostBest*100,
+                                                           thisCostLast*100))
 
 ############################
 # FINAL EVALUATION RESULTS #
@@ -824,12 +753,12 @@ for thisModel in modelList:
 
     # And print it:
     if doPrint:
-        print("\t%s: %6.4f (+-%6.4f) [Best] %6.4f (+-%6.4f) [Last]" % (
+        print("\t%s: %6.2f%% (+-%6.2f%%) [Best] %6.2f%% (+-%6.2f%%) [Last]" % (
                 thisModel,
-                meanCostBest[thisModel],
-                stdDevCostBest[thisModel],
-                meanCostLast[thisModel],
-                stdDevCostLast[thisModel]))
+                meanCostBest[thisModel] * 100,
+                stdDevCostBest[thisModel] * 100,
+                meanCostLast[thisModel] * 100,
+                stdDevCostLast[thisModel] * 100))
 
     # Save values
     writeVarValues(varsFile,
@@ -842,12 +771,12 @@ for thisModel in modelList:
 with open(varsFile, 'a+') as file:
     file.write("Final evaluations (%02d data splits)\n" % (nDataSplits))
     for thisModel in modelList:
-        file.write("\t%s: %6.4f (+-%6.4f) [Best] %6.4f (+-%6.4f) [Last]\n" % (
+        file.write("\t%s: %6.2f%% (+-%6.2f%%) [Best] %6.2f%% (+-%6.2f%%) [Last]\n" % (
                    thisModel,
-                   meanCostBest[thisModel],
-                   stdDevCostBest[thisModel],
-                   meanCostLast[thisModel],
-                   stdDevCostLast[thisModel]))
+                   meanCostBest[thisModel] * 100,
+                   stdDevCostBest[thisModel] * 100,
+                   meanCostLast[thisModel] * 100,
+                   stdDevCostLast[thisModel] * 100))
     file.write('\n')
 
 #%%##################################################################
@@ -986,7 +915,7 @@ if doFigs and doSaveVars:
         plt.errorbar(xValid, meanCostValid[key], yerr = stdDevCostValid[key],
                      color = '#95001A', linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
-        plt.ylabel(r'RMSE')
+        plt.ylabel(r'Error rate')
         plt.xlabel(r'Training steps')
         plt.legend([r'Training', r'Validation'])
         plt.title(r'%s' % key)
@@ -1011,7 +940,7 @@ if doFigs and doSaveVars:
         plt.errorbar(xValid, meanCostValid[key], yerr = stdDevCostValid[key],
                      linewidth = lineWidth,
                      marker = markerShape, markersize = markerSize)
-    plt.ylabel(r'RMSE')
+    plt.ylabel(r'Error rate')
     plt.xlabel(r'Training steps')
     plt.legend(list(meanCostValid.keys()))
     allCostValidFig.savefig(os.path.join(saveDirFigs,'allCostValid.pdf'),

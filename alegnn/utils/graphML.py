@@ -56,7 +56,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import Utils.graphTools as graphTools
+import alegnn.utils.graphTools as graphTools
 
 zeroTolerance = 1e-9 # Values below this number are considered zero.
 infiniteNumber = 1e12 # infinity equals this number
@@ -1352,7 +1352,7 @@ class MaxLocalActivation(nn.Module):
         for k in range(1,self.K+1):
             # For each hop (0,1,...) in the range K
             thisNeighborhood = graphTools.computeNeighborhood(S, k,
-                                                            outputType='matrix')
+                                                              outputType='matrix')
             # compute the k-hop neighborhood
             neighborhood.append(torch.tensor(thisNeighborhood).to(self.S.device))
             maxNeighborhoodSizes.append(thisNeighborhood.shape[1])
@@ -2011,7 +2011,7 @@ class SpectralGF(nn.Module):
             # Compute the hermitian
             VH[e,:,:] = V[e,:,:].conj().T
             # Compute the splineKernel basis matrix
-            splineKernel[e,:,:] = graphTools.splineBasis(self.M, Lambda[e,:])
+            splineKernel[e,:,:] = graphTools.splineBasis(self.M, Lambda[e, :])
         # Transform everything to tensors of appropriate type on appropriate
         # device, and store them.
         self.V = torch.tensor(V).type(S.dtype).to(S.device) # E x N x N
