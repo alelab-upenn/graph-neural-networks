@@ -1,4 +1,4 @@
-# 2018/12/05~
+# 2021/03/04~
 # Fernando Gama, fgama@seas.upenn.edu
 # Luana Ruiz, rubruiz@seas.upenn.edu
 """
@@ -29,6 +29,9 @@ GraphConvolutionAttentionNetwork: implement the graph convolution attention
     network (GCAT) architecture
 EdgeVariantAttention: implement the edge variant graph filter, with coefficients
     learned following a parameterization given by the attention mechanism
+GraphRecurrentNN: implements a graph recurrent neural network with static GSO
+GatedGraphRecurrentNN: implements a gated graph recurrent neural network with 
+    static GSO. Gates can be time, node or edge gates
 """
 
 import numpy as np
@@ -4350,3 +4353,633 @@ class EdgeVariantAttention(nn.Module):
         for l in range(self.L):
             self.EVGAT[2*l].addGSO(self.S)
             self.EVGAT[2*l+1].addGSO(self.S)
+
+class GraphRecurrentNN(nn.Module):
+# Luana R. Ruiz, rubruiz@seas.upenn.edu, 2021/03/04
+    """
+    GraphRecurrentNN: implements the GRNN architecture. It is a single-layer 
+    GRNN and the hidden state is initialized at random drawing from a standard 
+    gaussian.
+    
+    Initialization:
+        
+        GraphRecurrentNN(dimInputSignals, dimOutputSignals,
+                            dimHiddenSignals, nFilterTaps, bias, # Filtering
+                            nonlinearityHidden, nonlinearityOutput,
+                            nonlinearityReadout, # Nonlinearities
+                            dimReadout, # Local readout layer
+                            dimEdgeFeatures, # Structure
+                            GSO)
+        
+        Input:
+            /** Graph convolutions **/
+            dimInputSignals (int): dimension of the input signals
+            dimOutputSignals (int): dimension of the output signals
+            dimHiddenSignals (int): dimension of the hidden state
+            nFilterTaps (list of int): a list with two elements, the first one
+                is the number of filter taps for the filters in the hidden
+                state equation, the second one is the number of filter taps
+                for the filters in the output
+            bias (bool): include bias after graph filter on every layer
+            
+            /** Activation functions **/
+            nonlinearityHidden (torch.function): the nonlinearity to apply
+                when computing the hidden state; it has to be a torch function,
+                not a nn.Module
+            nonlinearityOutput (torch.function): the nonlinearity to apply when
+                computing the output signal; it has to be a torch function, not
+                a nn.Module.
+            nonlinearityReadout (nn.Module): the nonlinearity to apply at the
+                end of the readout layer (if the readout layer has more than
+                one layer); this one has to be a nn.Module, instead of just a
+                torch function.
+                
+            /** Readout layer **/
+            dimReadout (list of int): number of output hidden units of a
+                sequence of fully connected layers applied locally at each node
+                (i.e. no exchange of information involved).
+                
+            /** Graph structure **/
+            dimEdgeFeatures (int): number of edge features
+            GSO (np.array): graph shift operator of choice.
+            
+        Output:
+            nn.Module with a GRNN architecture with the above specified
+            characteristics
+            
+    Forward call:
+        
+        GraphRecurrentNN(x)
+        
+        Input:
+            x (torch.tensor): input data of shape
+                batchSize x timeSamples x dimInputSignals x numberNodes
+
+        Output:
+            y (torch.tensor): output data after being processed by the GRNN; 
+                batchSize x timeSamples x dimReadout[-1] x numberNodes
+        
+    Other methods:
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GRNN y,
+        which has shape batchSize x timeSamples x dimReadout[-1] x numberNodes,
+        as well as the output of the GRNN (i.e. before the readout layers), 
+        yGNN of shape batchSize x timeSamples x dimInputSignals x numberNodes. 
+        This can be used to isolate the effect of the graph convolutions from 
+        the effect of the readout layer.
+        
+        y = .singleNodeForward(x, nodes): outputs the value of the last
+        layer at a single node. x is the usual input of shape batchSize 
+        x timeSamples x dimInputSignals x numberNodes. nodes is either a single
+        node (int) or a collection of nodes (list or numpy.array) of length
+        batchSize, where for each element in the batch, we get the output at
+        the single specified node. The output y is of shape batchSize 
+        x timeSamples x dimReadout[-1].
+        
+        .changeGSO(S): takes as input a new graph shift operator S as a tensor of shape 
+            (dimEdgeFeatures x) numberNodes x numberNodes
+        Then, next time the GraphRecurrentNN is run, it will run over the graph 
+        with GSO S, instead of running over the original GSO S. This is 
+        particularly useful when training on one graph, and testing on another
+        one.
+        >> Obs.: The number of nodes in the GSOs need not be the same.
+            
+        
+    """
+    def __init__(self,
+                 # Graph filtering
+                 dimInputSignals,
+                 dimOutputSignals,
+                 dimHiddenSignals,
+                 nFilterTaps, bias,
+                 # Nonlinearities
+                 nonlinearityHidden,
+                 nonlinearityOutput,
+                 nonlinearityReadout, # nn.Module
+                 # Local MLP in the end
+                 dimReadout,
+                 # Structure
+                 GSO):
+        # Initialize parent:
+        super().__init__()
+        
+        # A list of two int, one for the number of filter taps (the computation
+        # of the hidden state has the same number of filter taps)
+        assert len(nFilterTaps) == 2
+        
+        # Store the values (using the notation in the paper):
+        self.F = dimInputSignals # Number of input features
+        self.G = dimOutputSignals # Number of output features
+        self.H = dimHiddenSignals # NUmber of hidden features
+        self.K = nFilterTaps # Filter taps
+        self.bias = bias # Boolean
+        # Store the rest of the variables
+        self.sigma = nonlinearityHidden
+        self.rho = nonlinearityOutput
+        self.nonlinearityReadout = nonlinearityReadout
+        self.dimReadout = dimReadout
+        # Check whether the GSO has features or not. After that, always handle
+        # it as a matrix of dimension E x N x N.
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        self.E = GSO.shape[0] # Number of edge features
+        self.N = GSO.shape[1]
+        self.S = GSO
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
+        
+        #\\\ Hidden State RNN \\\
+        # Create the layer that generates the hidden state, and generate z0
+        self.hiddenState = gml.HiddenState(self.F, self.H, self.K[0],
+                                       nonlinearity = self.sigma, E = self.E,
+                                       bias = self.bias)
+        #\\\ Output Graph Filters \\\
+        self.outputState = gml.GraphFilter(self.H, self.G, self.K[1],
+                                              E = self.E, bias = self.bias)
+        # Add the GSO for each graph filter
+        self.hiddenState.addGSO(self.S)
+        self.outputState.addGSO(self.S)
+        
+        #\\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimReadout) > 0: # Maybe we don't want to readout anything
+            # The first layer has to connect whatever was left of the graph 
+            # filtering stage to create the number of features required by
+            # the readout layer
+            fc.append(nn.Linear(self.G, dimReadout[0], bias = self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimReadout)-1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.nonlinearityReadout())
+                # And add the linear layer
+                fc.append(nn.Linear(dimReadout[l], dimReadout[l+1],
+                                    bias = self.bias))
+        # And we're done
+        self.Readout = nn.Sequential(*fc)
+        # so we finally have the architecture.
+        
+    def splitForward(self, x):
+
+        # Check the dimensions of the input
+        #   S: E x N x N
+        #   x: B x T x F[0] x N
+        assert len(self.S.shape) == 3
+        assert self.S.shape[0] == self.E     
+        N = self.S.shape[1]
+        assert self.S.shape[2] == N
+        
+        assert len(x.shape) == 4
+        B = x.shape[0]
+        T = x.shape[1]
+        assert x.shape[2] == self.F
+        assert x.shape[3] == N
+        
+        # This can be generated here or generated outside of here, not clear yet
+        # what's the most coherent option
+        z0 = torch.randn((B, self.H, N), device = x.device)
+        
+        # Compute the trajectory of hidden states
+        z, _ = self.hiddenState(x, z0)
+        z = z.reshape((B*T,self.H,N))
+        # Compute the output trajectory from the hidden states
+        yOut = self.outputState(z)
+        yOut = self.rho(yOut) # Don't forget the nonlinearity!
+        yOut = yOut.reshape((B,T,self.G,N))
+        #   B x T x G x N
+        # Change the order, for the readout
+        y = yOut.permute(0, 1, 3, 2) # B x T x N x G
+        # And, feed it into the Readout layer
+        y = self.Readout(y) # B x T x N x dimReadout[-1]
+        # Reshape and return
+        return y.permute(0, 1, 3, 2), yOut
+        # B x T x dimReadout[-1] x N, B x T x dimFeatures[-1] x N
+    
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
+        
+    def singleNodeForward(self, x, nodes):
+        
+        # x is of shape B x T x F[0] x N
+        batchSize = x.shape[0]
+        N = x.shape[3]
+        
+        # nodes is either an int, or a list/np.array of ints of size B
+        assert type(nodes) is int \
+                or type(nodes) is list \
+                or type(nodes) is np.ndarray
+        
+        # Let us start by building the selection matrix
+        # This selection matrix has to be a matrix of shape
+        #   B x 1 x N[-1] x 1
+        # so that when multiplying with the output of the forward, we get a
+        #   B x T x dimRedout[-1] x 1
+        # and we just squeeze the last dimension
+        
+        # TODO: The big question here is if multiplying by a matrix is faster
+        # than doing torch.index_select
+        
+        # Let's always work with numpy arrays to make it easier.
+        if type(nodes) is int:
+            # Change the node number to accommodate the new order
+            nodes = self.order.index(nodes)
+            # If it's int, make it a list and an array
+            nodes = np.array([nodes], dtype=np.int)
+            # And repeat for the number of batches
+            nodes = np.tile(nodes, batchSize)
+        if type(nodes) is list:
+            newNodes = [self.order.index(n) for n in nodes]
+            nodes = np.array(newNodes, dtype = np.int)
+        elif type(nodes) is np.ndarray:
+            newNodes = np.array([np.where(np.array(self.order) == n)[0][0] \
+                                                                for n in nodes])
+            nodes = newNodes.astype(np.int)
+        # Now, nodes is an np.int np.ndarray with shape batchSize
+        
+        # Build the selection matrix
+        selectionMatrix = np.zeros([batchSize, 1, N, 1])
+        selectionMatrix[np.arange(batchSize), nodes, 0] = 1.
+        # And convert it to a tensor
+        selectionMatrix = torch.tensor(selectionMatrix,
+                                       dtype = x.dtype,
+                                       device = x.device)
+        
+        # Now compute the output
+        y = self.forward(x)
+        # This output is of size B x T x dimReadout[-1] x N
+        
+        # Multiply the output
+        y = torch.matmul(y, selectionMatrix)
+        #   B x T x dimReadout[-1] x 1
+        
+        # Squeeze the last dimension and return
+        return y.squeeze(3)
+    
+    def changeGSO(self, GSO):
+        
+        # We use this to change the GSO, using the same graph filters.
+        
+        # Check that the new GSO has the correct
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        
+        # Get dataType and device of the current GSO, so when we replace it, it
+        # is still located in the same type and the same device.
+        dataType = self.S.dtype
+        if 'device' in dir(self.S):
+            device = self.S.device
+        else:
+            device = None
+            
+        self.S = GSO
+        # Change data type and device as required
+        self.S = changeDataType(self.S, dataType)
+        if device is not None:
+            self.S = self.S.to(device)
+            
+        # Add the GSO for each graph filter
+        self.hiddenState.addGSO(self.S)
+        self.outputState.addGSO(self.S)
+            
+class GatedGraphRecurrentNN(nn.Module):
+# Luana R. Ruiz, rubruiz@seas.upenn.edu, 2021/03/04
+    """
+   GatedGraphRecurrentNN: implements the (time, node, edge)-gated GRNN 
+   architecture. It is a single-layer gated GRNN and the hidden state is 
+   initialized at random drawing from a standard gaussian.
+    
+    Initialization:
+        
+        GatedGraphRecurrentNN(dimInputSignals, dimOutputSignals,
+                            dimHiddenSignals, nFilterTaps, bias, # Filtering
+                            nonlinearityHidden, nonlinearityOutput,
+                            nonlinearityReadout, # Nonlinearities
+                            dimReadout, # Local readout layer
+                            dimEdgeFeatures, GSO, # Structure
+                            gateType) # Gating
+        
+        Input:
+            /** Graph convolutions **/
+            dimInputSignals (int): dimension of the input signals
+            dimOutputSignals (int): dimension of the output signals
+            dimHiddenSignals (int): dimension of the hidden state
+            nFilterTaps (list of int): a list with two elements, the first one
+                is the number of filter taps for the filters in the hidden
+                state equation, the second one is the number of filter taps
+                for the filters in the output
+            bias (bool): include bias after graph filter on every layer
+            
+            /** Activation functions **/
+            nonlinearityHidden (torch.function): the nonlinearity to apply
+                when computing the hidden state; it has to be a torch function,
+                not a nn.Module
+            nonlinearityOutput (torch.function): the nonlinearity to apply when
+                computing the output signal; it has to be a torch function, not
+                a nn.Module.
+            nonlinearityReadout (nn.Module): the nonlinearity to apply at the
+                end of the readout layer (if the readout layer has more than
+                one layer); this one has to be a nn.Module, instead of just a
+                torch function.
+                
+            /** Readout layer **/
+            dimReadout (list of int): number of output hidden units of a
+                sequence of fully connected layers applied locally at each node
+                (i.e. no exchange of information involved).
+                
+            /** Graph structure **/
+            dimEdgeFeatures (int): number of edge features
+            GSO (np.array): graph shift operator of choice.
+            
+            /** Gating **/
+            gateType (string): 'time', 'node' or 'edge' gating
+            
+            
+        Output:
+            nn.Module with a gated GRNN architecture with the above specified
+            characteristics
+            
+    Forward call:
+        
+        GatedGraphRecurrentNN(x)
+        
+        Input:
+            x (torch.tensor): input data of shape
+                batchSize x timeSamples x dimInputSignals x numberNodes
+
+        Output:
+            y (torch.tensor): output data after being processed by the GRNN; 
+                batchSize x timeSamples x dimReadout[-1] x numberNodes
+        
+    Other methods:
+            
+        y, yGNN = .splitForward(x): gives the output of the entire GRNN y,
+        which has shape batchSize x timeSamples x dimReadout[-1] x numberNodes,
+        as well as the output of the GRNN (i.e. before the readout layers), 
+        yGNN of shape batchSize x timeSamples x dimInputSignals x numberNodes. 
+        This can be used to isolate the effect of the graph convolutions from 
+        the effect of the readout layer.
+        
+        y = .singleNodeForward(x, nodes): outputs the value of the last
+        layer at a single node. x is the usual input of shape batchSize 
+        x timeSamples x dimInputSignals x numberNodes. nodes is either a single
+        node (int) or a collection of nodes (list or numpy.array) of length
+        batchSize, where for each element in the batch, we get the output at
+        the single specified node. The output y is of shape batchSize 
+        x timeSamples x dimReadout[-1].
+        
+        .changeGSO(S): takes as input a new graph shift operator S as a tensor of shape 
+            (dimEdgeFeatures x) numberNodes x numberNodes
+        Then, next time the GatedGraphRecurrentNN is run, it will run over the graph 
+        with GSO S, instead of running over the original GSO S. This is 
+        particularly useful when training on one graph, and testing on another
+        one.
+        >> Obs.: The number of nodes in the GSOs need not be the same.
+            
+        
+    """
+    def __init__(self,
+                 # Graph filtering
+                 dimInputSignals,
+                 dimOutputSignals,
+                 dimHiddenSignals,
+                 nFilterTaps, bias,
+                 # Nonlinearities
+                 nonlinearityHidden,
+                 nonlinearityOutput,
+                 nonlinearityReadout, # nn.Module
+                 # Local MLP in the end
+                 dimReadout,
+                 # Structure
+                 GSO,
+                 # Gating
+                 gateType):
+        # Initialize parent:
+        super().__init__()
+        
+        # A list of two int, one for the number of filter taps (the computation
+        # of the hidden state has the same number of filter taps)
+        assert len(nFilterTaps) == 2
+        
+        # Store the values (using the notation in the paper):
+        self.F = dimInputSignals # Number of input features
+        self.G = dimOutputSignals # Number of output features
+        self.H = dimHiddenSignals # NUmber of hidden features
+        self.K = nFilterTaps # Filter taps
+        self.bias = bias # Boolean
+        # Store the rest of the variables
+        self.sigma = nonlinearityHidden
+        self.rho = nonlinearityOutput
+        self.nonlinearityReadout = nonlinearityReadout
+        self.dimReadout = dimReadout
+        # Check whether the GSO has features or not. After that, always handle
+        # it as a matrix of dimension E x N x N.
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        self.E = GSO.shape[0] # Number of edge features
+        self.N = GSO.shape[1]
+        self.S = GSO
+        if 'torch' not in repr(self.S.dtype):
+            self.S = torch.tensor(self.S)
+        
+        #\\\ Hidden State RNN \\\
+        # Create the layer that generates the hidden state, and generate z0
+        # The type of hidden layer depends on the type of gating
+        assert gateType == 'time' or gateType == 'node' or gateType == 'edge'
+        if gateType == 'time':
+            self.hiddenState = gml.TimeGatedHiddenState(self.F, self.H, self.K[0],
+                                       nonlinearity = self.sigma, E = self.E,
+                                       bias = self.bias)
+        elif gateType == 'node':
+            self.hiddenState = gml.NodeGatedHiddenState(self.F, self.H, self.K[0],
+                                       nonlinearity = self.sigma, E = self.E,
+                                       bias = self.bias)
+        elif gateType == 'edge':
+            self.hiddenState = gml.EdgeGatedHiddenState(self.F, self.H, self.K[0],
+                                       nonlinearity = self.sigma, E = self.E,
+                                       bias = self.bias)
+        #\\\ Output Graph Filters \\\
+        self.outputState = gml.GraphFilter(self.H, self.G, self.K[1],
+                                              E = self.E, bias = self.bias)
+        # Add the GSO for each graph filter
+        self.hiddenState.addGSO(self.S)
+        self.outputState.addGSO(self.S)
+        
+        #\\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimReadout) > 0: # Maybe we don't want to readout anything
+            # The first layer has to connect whatever was left of the graph 
+            # filtering stage to create the number of features required by
+            # the readout layer
+            fc.append(nn.Linear(self.G, dimReadout[0], bias = self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimReadout)-1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.nonlinearityReadout())
+                # And add the linear layer
+                fc.append(nn.Linear(dimReadout[l], dimReadout[l+1],
+                                    bias = self.bias))
+        # And we're done
+        self.Readout = nn.Sequential(*fc)
+        # so we finally have the architecture.
+        
+    def splitForward(self, x):
+
+        # Check the dimensions of the input
+        #   S: E x N x N
+        #   x: B x T x F[0] x N
+        assert len(self.S.shape) == 3
+        assert self.S.shape[0] == self.E     
+        N = self.S.shape[1]
+        assert self.S.shape[2] == N
+        
+        assert len(x.shape) == 4
+        B = x.shape[0]
+        T = x.shape[1]
+        assert x.shape[2] == self.F
+        assert x.shape[3] == N
+        
+        # This can be generated here or generated outside of here, not clear yet
+        # what's the most coherent option
+        z0 = torch.randn((B, self.H, N), device = x.device)
+        
+        # Compute the trajectory of hidden states
+        z, _ = self.hiddenState(x, z0)
+        z = z.reshape((B*T,self.H,N))
+        # Compute the output trajectory from the hidden states
+        yOut = self.outputState(z)
+        yOut = self.rho(yOut) # Don't forget the nonlinearity!
+        yOut = yOut.reshape((B,T,self.G,N))
+        #   B x T x G x N
+        # Change the order, for the readout
+        y = yOut.permute(0, 1, 3, 2) # B x T x N x G
+        # And, feed it into the Readout layer
+        y = self.Readout(y) # B x T x N x dimReadout[-1]
+        # Reshape and return
+        return y.permute(0, 1, 3, 2), yOut
+        # B x T x dimReadout[-1] x N, B x T x dimFeatures[-1] x N
+    
+    def forward(self, x):
+        
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        output, _ = self.splitForward(x)
+        
+        return output
+        
+    def singleNodeForward(self, x, nodes):
+        
+        # x is of shape B x T x F[0] x N
+        batchSize = x.shape[0]
+        N = x.shape[3]
+        
+        # nodes is either an int, or a list/np.array of ints of size B
+        assert type(nodes) is int \
+                or type(nodes) is list \
+                or type(nodes) is np.ndarray
+        
+        # Let us start by building the selection matrix
+        # This selection matrix has to be a matrix of shape
+        #   B x 1 x N[-1] x 1
+        # so that when multiplying with the output of the forward, we get a
+        #   B x T x dimRedout[-1] x 1
+        # and we just squeeze the last dimension
+        
+        # TODO: The big question here is if multiplying by a matrix is faster
+        # than doing torch.index_select
+        
+        # Let's always work with numpy arrays to make it easier.
+        if type(nodes) is int:
+            # Change the node number to accommodate the new order
+            nodes = self.order.index(nodes)
+            # If it's int, make it a list and an array
+            nodes = np.array([nodes], dtype=np.int)
+            # And repeat for the number of batches
+            nodes = np.tile(nodes, batchSize)
+        if type(nodes) is list:
+            newNodes = [self.order.index(n) for n in nodes]
+            nodes = np.array(newNodes, dtype = np.int)
+        elif type(nodes) is np.ndarray:
+            newNodes = np.array([np.where(np.array(self.order) == n)[0][0] \
+                                                                for n in nodes])
+            nodes = newNodes.astype(np.int)
+        # Now, nodes is an np.int np.ndarray with shape batchSize
+        
+        # Build the selection matrix
+        selectionMatrix = np.zeros([batchSize, 1, N, 1])
+        selectionMatrix[np.arange(batchSize), nodes, 0] = 1.
+        # And convert it to a tensor
+        selectionMatrix = torch.tensor(selectionMatrix,
+                                       dtype = x.dtype,
+                                       device = x.device)
+        
+        # Now compute the output
+        y = self.forward(x)
+        # This output is of size B x T x dimReadout[-1] x N
+        
+        # Multiply the output
+        y = torch.matmul(y, selectionMatrix)
+        #   B x T x dimReadout[-1] x 1
+        
+        # Squeeze the last dimension and return
+        return y.squeeze(3)
+    
+    def changeGSO(self, GSO):
+        
+        # We use this to change the GSO, using the same graph filters.
+        
+        # Check that the new GSO has the correct
+        assert len(GSO.shape) == 2 or len(GSO.shape) == 3
+        if len(GSO.shape) == 2:
+            assert GSO.shape[0] == GSO.shape[1]
+            GSO = GSO.reshape([1, GSO.shape[0], GSO.shape[1]]) # 1 x N x N
+        else:
+            assert GSO.shape[1] == GSO.shape[2] # E x N x N
+        
+        # Get dataType and device of the current GSO, so when we replace it, it
+        # is still located in the same type and the same device.
+        dataType = self.S.dtype
+        if 'device' in dir(self.S):
+            device = self.S.device
+        else:
+            device = None
+            
+        self.S = GSO
+        # Change data type and device as required
+        self.S = changeDataType(self.S, dataType)
+        if device is not None:
+            self.S = self.S.to(device)
+            
+        # Add the GSO for each graph filter
+        self.hiddenState.addGSO(self.S)
+        self.outputState.addGSO(self.S)
+        

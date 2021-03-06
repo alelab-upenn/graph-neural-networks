@@ -1,4 +1,4 @@
-# 2018/12/04~
+# 2021/03/04~
 # Fernando Gama, fgama@seas.upenn.edu
 # Luana Ruiz, rubruiz@seas.upenn.edu
 # Kate Tolstaya, eig@seas.upenn.edu
@@ -22,6 +22,10 @@ MovieLens (class): Loads and handles handles the MovieLens-100k dataset
 Flocking (class): creates trajectories for the problem of flocking
 
 TwentyNews (class): handles the 20NEWS dataset
+
+Epidemics (class): loads the edge list of the friendship network of the high 
+    school in Marseille and generates the epidemic spread data based on the SIR 
+    model
 """
 
 import os
@@ -32,6 +36,7 @@ import zipfile # To handle zip files
 import gzip # To handle gz files
 import shutil # Command line utilities
 import matplotlib
+import csv
 matplotlib.rcParams['text.usetex'] = True
 matplotlib.rcParams['font.family'] = 'serif'
 import matplotlib.pyplot as plt
@@ -234,6 +239,14 @@ class _data:
                         self.samples[key]['signals'] = np.expand_dims(
                                                    self.samples[key]['signals'],
                                                    axis = 1)
+                elif len(self.samples[key]['signals'].shape) == 3:
+                    if 'torch' in repr(self.dataType):
+                        self.samples[key]['signals'] = \
+                                       self.samples[key]['signals'].unsqueeze(2)
+                    else:
+                        self.samples[key]['signals'] = np.expand_dims(
+                                                   self.samples[key]['signals'],
+                                                   axis = 2)
         
     def astype(self, dataType):
         # This changes the type for the minimal attributes (samples). This 
@@ -4517,3 +4530,121 @@ class Text20News(TextDataset):
         self.labels = dataset.target
         self.class_names = dataset.target_names
         assert max(self.labels) + 1 == len(self.class_names)
+
+class Epidemics(_data):
+# Luana R. Ruiz, rubruiz@seas.upenn.edu, 2021/03/04
+        def __init__(self, seqLen, seedProb, infectionProb, recoveryTime, 
+                     nTrain, nValid, nTest, x0 = None, dataType = np.float64, 
+                     device = 'cpu'):
+            
+            super().__init__()
+            self.seqLen = seqLen
+            self.seedProb = seedProb
+            self.infectionProb = infectionProb
+            self.recoveryTime = recoveryTime
+            self.nTrain = nTrain
+            self.nValid = nValid
+            self.nTest = nTest
+            nSamples = nTrain + nValid + nTest
+            self.dataType = dataType
+            self.device = device
+            
+            self.Adj = self.createGraph()
+            self.N = self.Adj.shape[0]
+            
+            if x0 is not None:
+                self.x0 = x0
+            else: 
+                x0 = np.random.binomial(1,self.seedProb,(nSamples,self.N))
+                while np.sum(np.sum(x0,axis=1)>0) < nSamples:
+                    x0 = np.random.binomial(1,self.seedProb,(nSamples,self.N))
+                self.x0 = x0
+                
+            horizon = 2*seqLen
+            x_t = x0
+            x = np.expand_dims(x_t, axis=1)
+            timeInfection = np.zeros((self.N,nSamples))
+            for t in range(1,horizon):
+                x_tplus1 = x_t
+                for n in range(nSamples):
+                    for i in range(self.N):
+                        if x_t[n,i] == 1:
+                            for j in list(np.argwhere(self.Adj[i,i:]>0)):
+                                if x_t[n,j] == 0:
+                                    x_tplus1[n,j] == np.random.binomial(1,
+                                                    infectionProb*t/horizon)
+                                    timeInfection[j,n] = t
+                            if timeInfection[i,n]-t >= recoveryTime:
+                                x_tplus1[n,i] = 2
+                x_t = x_tplus1    
+                x = np.concatenate((x,np.expand_dims(x_t, axis=1)),axis=1)
+                
+            y = x[:,seqLen:horizon,:] == 1
+            x = x[:,:seqLen,:] 
+            
+            self.samples['train']['signals'] = x[0:nTrain,:,:]
+            self.samples['train']['targets'] = y[0:nTrain,:,:]
+            self.samples['valid']['signals'] = x[nTrain:nTrain+nValid,:,:]
+            self.samples['valid']['targets'] = y[nTrain:nTrain+nValid,:,:]
+            self.samples['test']['signals'] = x[nTrain+nValid:nSamples,:,:]
+            self.samples['test']['targets'] = y[nTrain+nValid:nSamples,:,:]
+                
+        @staticmethod
+        def createGraph():
+            
+            edge_list = []
+            with open('datasets/epidemics/edge_list.txt') as csv_file:
+                csv_reader = csv.reader(csv_file, delimiter='\t')
+                for row in csv_reader:
+                    aux_list = []
+                    aux_list.append(int(row[0])-1)
+                    aux_list.append(int(row[1])-1)
+                    edge_list.append(aux_list)
+            nNodes = max(max(edge_list))+1
+            Adj = [[0]*nNodes for _ in range(nNodes)]
+            for sink, source in edge_list:
+                Adj[sink][source] = 1
+            Adj = np.array(Adj)
+            Adj = Adj + np.transpose(Adj) > 0
+            idx_0 = np.argwhere(np.matmul(Adj,np.ones(nNodes))>0).squeeze()
+            Adj = Adj[idx_0,:]
+            Adj = Adj[:,idx_0]
+            
+            return Adj
+        
+        def evaluate(self, yHat, y, tol = 1e-9):
+            
+            dimensions = len(yHat.shape)
+            C = yHat.shape[dimensions-2]
+            N = yHat.shape[dimensions-1]
+            yHat = yHat.reshape((-1,C,N))
+            yHat = torch.nn.functional.log_softmax(yHat, dim=1)
+            yHat = torch.exp(yHat)
+            yHat = torch.argmax(yHat,dim=1)
+            yHat = yHat.double()
+            y = y.reshape((-1,N))
+            
+            tp = torch.sum(y*yHat,1)
+            #tn = torch.sum((1-y)*(1-yHat),1)
+            fp = torch.sum((1-y)*yHat,1)
+            fn = torch.sum(y*(1-yHat),1)
+        
+            p = tp / (tp + fp)
+            r = tp / (tp + fn)
+            
+            idx_p = p!=p
+            idx_tp = tp<tol
+            idx_p1 = idx_p*idx_tp
+            p[idx_p] = 0
+            p[idx_p1] = 1
+            idx_r = r!=r
+            idx_r1 = idx_r*idx_tp
+            r[idx_r] = 0
+            r[idx_r1] = 1
+        
+            f1 = 2*p*r / (p+r)
+            f1[f1!=f1] = 0
+            
+            return 1 - torch.mean(f1)
+                    
+            
