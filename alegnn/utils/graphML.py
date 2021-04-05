@@ -1390,6 +1390,10 @@ def GatedGRNN(a, b, S, x, z0, sigma, q_hat = torch.ones(1), q_check = torch.ones
         if len(q_check.shape) > 4:
             assert q_check.shape[4] == N
     
+    # Move to device
+    q_hat = q_hat.to(x.device)
+    q_check = q_check.to(x.device)
+
     # Checking if there is bias
     if xBias is not None:
         xBias = xBias.reshape(1,H,1)
