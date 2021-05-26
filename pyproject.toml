@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "alegnn"
+version = "0.4.0"
+description = ""
+authors = ["Damian Owekro <owerko@seas.upenn.edu>"]
+license = "GPL-3.0-or-later"
+
+[tool.poetry.dependencies]
+python = ">=3.7,<3.10"
+scikit-learn = "^0.24.2"
+torch = "^1.8.1"
+matplotlib = "^3.4.2"
+scipy = ">=1.5.4"
+hdf5storage = "^0.1.18"
+gensim = "^4.0.1"
+python-Levenshtein = "^0.12.2"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
