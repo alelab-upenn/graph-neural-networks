@@ -1,3 +1,4 @@
 /dist/
 /build/
 /alegnn.egg-info/
+poetry.lock
