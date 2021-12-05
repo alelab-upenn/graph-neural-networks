@@ -86,11 +86,11 @@ class SelectionGNN(nn.Module):
             >> Obs.: If coarsening = True, this variable is ignored since the
                 number of nodes in each layer is given by the graph coarsening
                 algorithm.
-            poolingFunction (nn.Module in Utils.graphML or in torch.nn): 
+            poolingFunction (nn.Module in alegnn.utils.graphML or in torch.nn): 
                 summarizing function
             >> Obs.: If coarsening = True, then the pooling function is one of
                 the regular 1-d pooling functions available in torch.nn (instead
-                of one of the summarizing functions in Utils.graphML).
+                of one of the summarizing functions in alegnn.utils.graphML).
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
             >> Obs.: If coarsening = True, then the pooling size is ignored 
@@ -107,7 +107,7 @@ class SelectionGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
             coarsening (bool, default = False): if True uses graph coarsening
@@ -204,10 +204,10 @@ class SelectionGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -508,7 +508,7 @@ class LocalActivationGNN(nn.Module):
                 filters implemented at layer l+1, thus len(nFilterTaps) = L.
                 
             /** Activation function **/
-            nonlinearity (torch.nn): module from Utils.graphML non-linear
+            nonlinearity (torch.nn): module from alegnn.utils.graphML non-linear
                 local activation functions
             kHopActivation (list of int): number of neighborhood hop to include
                 in the local activation function at each layer
@@ -521,11 +521,11 @@ class LocalActivationGNN(nn.Module):
             >> Obs.: If coarsening = True, this variable is ignored since the
                 number of nodes in each layer is given by the graph coarsening
                 algorithm.
-            poolingFunction (nn.Module in Utils.graphML or in torch.nn): 
+            poolingFunction (nn.Module in alegnn.utils.graphML or in torch.nn): 
                 summarizing function
             >> Obs.: If coarsening = True, then the pooling function is one of
                 the regular 1-d pooling functions available in torch.nn (instead
-                of one of the summarizing functions in Utils.graphML).
+                of one of the summarizing functions in alegnn.utils.graphML).
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
             >> Obs.: If coarsening = True, then the pooling size is ignored 
@@ -542,7 +542,7 @@ class LocalActivationGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -629,10 +629,10 @@ class LocalActivationGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -855,7 +855,7 @@ class LocalGNN(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
             
@@ -869,7 +869,7 @@ class LocalGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -959,10 +959,10 @@ class LocalGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -1219,7 +1219,7 @@ class SpectralGNN(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -1234,7 +1234,7 @@ class SpectralGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -1314,10 +1314,10 @@ class SpectralGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -1525,7 +1525,7 @@ class NodeVariantGNN(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
             
@@ -1539,7 +1539,7 @@ class NodeVariantGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -1616,10 +1616,10 @@ class NodeVariantGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -1760,7 +1760,7 @@ class EdgeVariantGNN(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -1774,7 +1774,7 @@ class EdgeVariantGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -1852,10 +1852,10 @@ class EdgeVariantGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -1993,7 +1993,7 @@ class LocalEdgeNet(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -2007,7 +2007,7 @@ class LocalEdgeNet(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
         Output:
@@ -2086,10 +2086,10 @@ class LocalEdgeNet(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -2280,7 +2280,7 @@ class ARMAfilterGNN(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -2294,7 +2294,7 @@ class ARMAfilterGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
             
@@ -2388,10 +2388,10 @@ class ARMAfilterGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -2590,7 +2590,7 @@ class LocalARMA(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -2604,7 +2604,7 @@ class LocalARMA(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
             
@@ -2700,10 +2700,10 @@ class LocalARMA(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -2953,7 +2953,7 @@ class AggregationGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
             maxN (int): maximum number of neighborhood exchanges (default: None)
@@ -3030,10 +3030,10 @@ class AggregationGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -3271,7 +3271,7 @@ class MultiNodeAggregationGNN(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -3406,10 +3406,10 @@ class MultiNodeAggregationGNN(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -3606,7 +3606,7 @@ class GraphAttentionNetwork(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -3621,7 +3621,7 @@ class GraphAttentionNetwork(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -3683,10 +3683,10 @@ class GraphAttentionNetwork(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -3854,7 +3854,7 @@ class GraphConvolutionAttentionNetwork(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -3868,7 +3868,7 @@ class GraphConvolutionAttentionNetwork(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -3933,10 +3933,10 @@ class GraphConvolutionAttentionNetwork(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
@@ -4124,7 +4124,7 @@ class EdgeVariantAttention(nn.Module):
                 on each layer
             >> Obs.: The selected nodes are the first nSelectedNodes[l] starting
                 from the first element in the order specified by the given GSO
-            poolingFunction (nn.Module in Utils.graphML): summarizing function
+            poolingFunction (nn.Module in alegnn.utils.graphML): summarizing function
             poolingSize (list of int): size of the neighborhood to compute the
                 summary from at each layer
                 
@@ -4138,7 +4138,7 @@ class EdgeVariantAttention(nn.Module):
             order (string or None, default = None): determine the criteria to
                 use when reordering the nodes (i.e. for pooling reasons); the
                 string has to be such that there is a function named 
-                'perm' + order in Utils.graphTools that takes as input the GSO
+                'perm' + order in alegnn.utils.graphTools that takes as input the GSO
                 and returns a new GSO ordered by the specified criteria and
                 an order array
 
@@ -4202,10 +4202,10 @@ class EdgeVariantAttention(nn.Module):
             # If there's going to be reordering, then the value of the
             # permutation function will be given by the criteria in 
             # self.reorder. For instance, if self.reorder = 'Degree', then
-            # we end up calling the function Utils.graphTools.permDegree.
+            # we end up calling the function alegnn.utils.graphTools.permDegree.
             # We need to be sure that the function 'perm' + self.reorder
-            # is available in the Utils.graphTools module.
-            self.permFunction = eval('Utils.graphTools.perm' + order)
+            # is available in the alegnn.utils.graphTools module.
+            self.permFunction = eval('alegnn.utils.graphTools.perm' + order)
         else:
             self.permFunction = alegnn.utils.graphTools.permIdentity
             # This is overriden if coarsening is selected, since the ordering
