@@ -41,6 +41,7 @@ matplotlib.rcParams['text.usetex'] = True
 matplotlib.rcParams['font.family'] = 'serif'
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
+from sklearn.model_selection import train_test_split
 
 import numpy as np
 import torch
@@ -339,7 +340,216 @@ class _dataForClassification(_data):
             errorRate = totalErrors.astype(self.dataType)/N
         #   And from that, compute the accuracy
         return errorRate
-        
+
+class DataSSL(_data):
+    """
+    DataSSL:  Create Dataset for link prediction, train by Semi-Supervised Learning
+
+    Initialization:
+
+    Input:
+        G (class): Graph for SSL, needs an attribute
+            .N with the number of nodes (int) and attribute .W with the
+            adjacency matrix (np.array), .V with the eigenvalue
+            decomposition matrix as a feature (np.array)
+        dataType (dtype): datatype for the feature (default: np.float64)
+        device (device): if torch.Tensor datatype is selected, this is on what
+            device the data is saved.
+        splitRate (list of float): edge split rate for make train/validation/test set.
+            It is necessary to link prediction by Semi-Supervised Learning.
+        featuresDim (int) : dimension of features; Node features are used by slicing
+            the eigenvalue vector of the adjacency matrix by featureDim.
+
+    Methods:
+    features = .getFeatures()
+        OutPut:
+            Features (dtype.array): numberNodes X dimFeatures
+    posEdges, negEdges = .getEdges(samplesType)
+        Input:
+            samplesType (string): 'train', 'valid' or 'test' to determine from
+                which dataset to get the samples from
+        Output:
+            edges (dtype.array): numberEdges X 2
+            targets (dtype.array): numberEdges
+    .storeEdgeList(G): convert adj matrix to edge list and store the edges
+        Input:
+            G (class): Graph for SSL
+    .splitEdges(splitRate): split edges randomly with splitRate and store the edges
+        Input:
+            splitRate (list of float): split rate of the train/valid/test Node (default: [0.6, 0.2, 0.2])
+
+    .astype(type): change the type of the data matrix arrays.
+        Input:
+            type (dtype): target type of the variables (e.g. torch.float64,
+                numpy.float64, etc.)
+
+    .to(device): if dtype is torch.tensor, move them to the specified device.
+        Input:
+            device (string): target device to move the variables to (e.g. 'cpu',
+                'cuda:0', etc.)
+
+    errorRate = .evaluate(yHat, y)
+        Input:
+            yHat (dtype.array): probability of having edge(shape:
+                numberEdges)
+            y (dtype.array): correct labels (1-D binary vector, shape:
+                numberEdges)
+            tol (float): numerical tolerance to consider two numbers to be equal
+        Output:
+            errorRate (float): proportion of incorrect labels
+
+    """
+
+    def __init__(self, G, dataType = np.float64, device = 'cpu', splitRate = [0.6, 0.2, 0.2], featuresDim = 64):
+        # Initialize parent
+        super().__init__()
+        # Store attributes
+        self.G = G
+        self.features = G.V[:, :featuresDim]
+        self.adj = np.where(G.W == True, 1, 0)
+        # Split train/validation/test edges and store
+        assert len(splitRate) == 3
+        self.storeEdgeList(G)
+        self.splitEdges(splitRate)
+
+    def getFeatures(self):
+        # return the node features
+        return self.features
+
+    def getEdges(self, samplesType):
+        # return samplesType edges and targets
+        # samplesType: train. valid, test
+        # Check that the type is one of the possible ones
+        assert samplesType == 'train' or samplesType == 'valid' \
+               or samplesType == 'test'
+        edges = self.edgeList[samplesType]['edges']
+        targets = self.edgeList[samplesType]['targets']
+
+        return edges, targets
+
+    def storeEdgeList(self, G):
+        adj = np.where(G.W == True, 1, 0)
+        # Convert adj matrix to edge list
+        edgeList = []
+        for i in range(len(adj)):
+            for j in range(len(adj)):
+                edgeList.append([i, j, adj[i, j]])
+        edgeList = np.array(edgeList)
+        # Store edge list
+        self.edgeList = {}
+        self.edgeList['full'] = {}
+        self.edgeList['full']['edges'] = edgeList[:, :2]
+        self.edgeList['full']['targets'] = edgeList[:, 2]
+        self.edgeList['train'] = {}
+        self.edgeList['train']['edges'] = None
+        self.edgeList['train']['targets'] = None
+        self.edgeList['valid'] = {}
+        self.edgeList['valid']['edges'] = None
+        self.edgeList['valid']['targets'] = None
+        self.edgeList['test'] = {}
+        self.edgeList['test']['edges'] = None
+        self.edgeList['test']['targets'] = None
+
+    def splitEdges(self, splitRate):
+        # Get edges and targets
+        edges, targets = self.edgeList['full']['edges'], self.edgeList['full']['targets']
+        # Randomly split edges from splitRate
+        # Train / Test split
+        testRate = splitRate[2]
+        trainEdges, self.edgeList['test']['edges'], \
+        trainTargets, self.edgeList['test']['targets'] = \
+            train_test_split(edges, targets, test_size=testRate, stratify=targets)
+        # Train / Valid split
+        validRate = splitRate[1] / (splitRate[1] + splitRate[0])
+        self.edgeList['train']['edges'], self.edgeList['valid']['edges'], \
+        self.edgeList['train']['targets'], self.edgeList['valid']['targets'] = \
+            train_test_split(trainEdges, trainTargets, test_size=validRate, stratify=trainTargets)
+
+    def astype(self, dataType):
+        # This changes the type for the minimal attributes (samples). This
+        # methods should still be initialized within the data classes, if more
+        # attributes are used.
+
+        # The labels could be integers as created from the dataset, so if they
+        # are, we need to be sure they are integers also after conversion.
+        # To do this we need to match the desired dataType to its int
+        # counterpart. Typical examples are:
+        #   numpy.float64 -> numpy.int64
+        #   numpy.float32 -> numpy.int32
+        #   torch.float64 -> torch.int64
+        #   torch.float32 -> torch.int32
+
+        targetType = str(self.edgeList['train']['targets'].dtype)
+        if 'int' in targetType:
+            if 'numpy' in repr(dataType):
+                if '64' in targetType:
+                    targetType = np.int64
+                elif '32' in targetType:
+                    targetType = np.int32
+            elif 'torch' in repr(dataType):
+                if '64' in targetType:
+                    targetType = torch.int64
+                elif '32' in targetType:
+                    targetType = torch.int32
+        else:  # If there is no int, just stick with the given dataType
+            targetType = dataType
+
+        # Now that we have selected the dataType, and the corresponding
+        # labelType, we can proceed to convert the data into the corresponding
+        # type
+        for key in self.edgeList.keys():
+            self.edgeList[key]['edges'] = changeDataType(
+                                                    self.edgeList[key]['edges'],
+                                                    targetType)
+            self.edgeList[key]['targets'] = changeDataType(
+                                                    self.edgeList[key]['targets'],
+                                                    targetType)
+        self.features = changeDataType(self.features, dataType)
+        self.adj = changeDataType(self.adj, targetType)
+        # Update attribute
+        if dataType is not self.dataType:
+            self.dataType = dataType
+
+    def to(self, device):
+        # This changes the type for the minimal attributes (samples). This
+        # methods should still be initialized within the data classes, if more
+        # attributes are used.
+        # This can only be done if they are torch tensors
+        if 'torch' in repr(self.dataType):
+            for key in self.edgeList.keys():
+                for secondKey in self.edgeList[key].keys():
+                    self.edgeList[key][secondKey] \
+                        = self.edgeList[key][secondKey].to(device)
+            self.adj = self.adj.to(device)
+            self.features = self.features.to(device)
+            # If the device changed, save it.
+            if device is not self.device:
+                self.device = device
+
+    def evaluate(self, yHat, y, tol = 1e-9):
+        """
+        Return the accuracy (ratio of yHat = y)
+        """
+        N = len(y)
+        if 'torch' in repr(self.dataType):
+            #   We compute the target label (hardmax)
+            threshhold = 0.5
+            yHat = torch.where(yHat > threshhold, 1, 0)
+            #   And compute the error
+            totalErrors = torch.sum(torch.abs(yHat - y) > tol)
+            errorRate = totalErrors/N
+        else:
+            yHat = np.array(yHat)
+            y = np.array(y)
+            #   We compute the target label (hardmax)
+            threshhold = 0.5
+            yHat = np.where(yHat > threshhold, 1, 0)
+            #   And compute the error
+            totalErrors = np.sum(np.abs(yHat - y) > tol)
+            errorRate = totalErrors/N
+        #   And from that, compute the accuracy
+        return errorRate
+
 class FacebookEgo:
     """
     FacebookEgo: Loads the adjacency matrix of the Facebook Egonets available

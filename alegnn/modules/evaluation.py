@@ -15,6 +15,8 @@ import os
 import torch
 import pickle
 
+from alegnn.utils.dataTools import DataSSL
+
 def evaluate(model, data, **kwargs):
     """
     evaluate: evaluate a model using classification error
@@ -41,10 +43,15 @@ def evaluate(model, data, **kwargs):
     ########
     # DATA #
     ########
-
-    xTest, yTest = data.getSamples('test')
-    xTest = xTest.to(device)
-    yTest = yTest.to(device)
+    #IF data is SSLData
+    if isinstance(data, DataSSL):
+        xTest, yTest = data.getFeatures('test')
+        xTest = xTest.to(device)
+        yTest = yTest.to(device)
+    else:
+        xTest, yTest = data.getSamples('test')
+        xTest = xTest.to(device)
+        yTest = yTest.to(device)
 
     ##############
     # BEST MODEL #

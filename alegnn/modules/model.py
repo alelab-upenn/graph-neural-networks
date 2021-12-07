@@ -93,16 +93,26 @@ class Model:
         # Saving directory
         self.saveDir = saveDir
         
-    def train(self, data, nEpochs, batchSize, **kwargs):
-        
-        self.trainer = self.trainer(self, data, nEpochs, batchSize, **kwargs)
-        
+    def train(self, data, nEpochs, batchSize = None, **kwargs):
+
+        # Train mode (Supervised Learning or Semi-Supervised Learning)
+        mode = "SL" if batchSize != None else "SSL"
+
+        # Train with mini batch (Supervised Learning)
+        if mode == "SL":
+            self.trainer = self.trainer(self, data, nEpochs, batchSize, **kwargs)
+
+        # Train with single batch (Semi-Supervised Learning)
+        if mode == "SSL":
+            self.trainer = self.trainer(self, data, nEpochs, **kwargs)
+
         return self.trainer.train()
-    
+
     def evaluate(self, data, **kwargs):
         
         return self.evaluator(self, data, **kwargs)
-    
+
+
     def save(self, label = '', **kwargs):
         if 'saveDir' in kwargs.keys():
             saveDir = kwargs['saveDir']

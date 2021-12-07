@@ -12,6 +12,9 @@ TrainerSingleNode: trainer class that computes a loss over the training set and
     runs an evaluation on a validation set, but assuming that the architectures
     involved have a single node forward structure and that the data involved
     has a method for identifying the target nodes
+TrainerSingleBatch : trainer class that computes a loss over the trainer set and
+    runs an evaluation on a validation test, but assuming that not use the mini batch,
+    use batch datasets as semi-supervised learning
 TrainerFlocking: traininer class that computes a loss over the training set,
     suited for the problem of flocking (i.e. it involves specific uses of
     the data, like computing trajectories or using DAGger)
@@ -712,7 +715,456 @@ class TrainerSingleNode(Trainer):
             costValid = self.data.evaluate(yHatValid, yValid)
         
         return lossValueValid.item(), costValid.item(), timeElapsed
-        
+
+class TrainerSSL:
+    """
+    TrainerSSL : trainer class that computes a loss over the trainer set
+        and runs an evaluation on a validation test, but assuming that
+        not use the mini batch, use batch datasets as semi-supervised learning
+
+    Initialization:
+
+        model (Modules.model class): model to train
+        data (Utils.data class): needs to have an evaluate method
+        nEpochs (int): number of epochs (passes over the dataset)
+
+        Optional (keyword) arguments:
+
+        learningRateDecayRate (float): float that multiplies the latest learning
+            rate used.
+        learningRateDecayPeriod (int): how many training steps before
+            multiplying the learning rate decay rate by the actual learning
+            rate.
+        > Obs.: Both of these have to be defined for the learningRateDecay
+              scheduler to be activated.
+        logger (Visualizer): save tensorboard logs.
+        saveDir (string): path to the directory where to save relevant training
+            variables.
+        graphNo (int): keep track of what graph realization this is
+            realitization
+        >> Alternatively, these last two keyword arguments can be used to keep
+            track of different trainings of the same model
+
+    Training:
+        .trainSSL(): trains by Semi-Supervised Learning and get loss, cost by edge link prediction.
+        .train(): trains the model and returns trainVars dict with the keys
+            'nEpochs': number of epochs (int)
+            'lossTrain': loss function on the training samples for each training
+                step (np.array)
+            'evalTrain': evaluation function on the training samples for each
+                training step (np.array)
+            'lossValid': loss function on the validation samples for each
+                validation step (np.array)
+            'evalValid': evaluation function on the validation samples for each
+                validation step (np.array)
+    """
+
+    def __init__(self, model, data, nEpochs, **kwargs):
+
+        # \\\ Store model
+
+        self.model = model
+        self.data = data
+
+        ####################################
+        # ARGUMENTS (Store chosen options) #
+        ####################################
+
+        # Training Options:
+        if 'doLogging' in kwargs.keys():
+            doLogging = kwargs['doLogging']
+        else:
+            doLogging = False
+
+        if 'doSaveVars' in kwargs.keys():
+            doSaveVars = kwargs['doSaveVars']
+        else:
+            doSaveVars = True
+
+        if 'doPrint' in kwargs.keys():
+            doPrint = kwargs['doPrint']
+        else:
+            doPrint = True
+
+        if 'learningRateDecayRate' in kwargs.keys() and \
+                'learningRateDecayPeriod' in kwargs.keys():
+            doLearningRateDecay = True
+            learningRateDecayRate = kwargs['learningRateDecayRate']
+            learningRateDecayPeriod = kwargs['learningRateDecayPeriod']
+        else:
+            doLearningRateDecay = False
+
+        if 'earlyStoppingLag' in kwargs.keys():
+            doEarlyStopping = True
+            earlyStoppingLag = kwargs['earlyStoppingLag']
+        else:
+            doEarlyStopping = False
+            earlyStoppingLag = 0
+
+        if 'graphNo' in kwargs.keys():
+            graphNo = kwargs['graphNo']
+        else:
+            graphNo = -1
+
+        if 'realizationNo' in kwargs.keys():
+            if 'graphNo' in kwargs.keys():
+                realizationNo = kwargs['realizationNo']
+            else:
+                graphNo = kwargs['realizationNo']
+                realizationNo = -1
+        else:
+            realizationNo = -1
+
+        if doLogging:
+            from alegnn.utils.visualTools import Visualizer
+            logsTB = os.path.join(self.saveDir, self.name + '-logsTB')
+            logger = Visualizer(logsTB, name='visualResults')
+        else:
+            logger = None
+
+        # No training case:
+        if nEpochs == 0:
+            doSaveVars = False
+            doLogging = False
+            # If there's no training happening, there's nothing to report about
+            # training losses and stuff.
+
+        ###################
+        # SAVE ATTRIBUTES #
+        ###################
+
+        self.trainingOptions = {}
+        self.trainingOptions['doLogging'] = doLogging
+        self.trainingOptions['logger'] = logger
+        self.trainingOptions['doSaveVars'] = doSaveVars
+        self.trainingOptions['doPrint'] = doPrint
+        self.trainingOptions['doLearningRateDecay'] = doLearningRateDecay
+        if doLearningRateDecay:
+            self.trainingOptions['learningRateDecayRate'] = \
+                                                         learningRateDecayRate
+            self.trainingOptions['learningRateDecayPeriod'] = \
+                                                         learningRateDecayPeriod
+        self.trainingOptions['doEarlyStopping'] = doEarlyStopping
+        self.trainingOptions['earlyStoppingLag'] = earlyStoppingLag
+        self.trainingOptions['nEpochs'] = nEpochs
+        self.trainingOptions['graphNo'] = graphNo
+        self.trainingOptions['realizationNo'] = realizationNo
+
+    def trainSSL(self):
+
+        # Get the data
+        adj = self.data.adj.to(self.model.device)
+        X = self.data.getFeatures()
+        X = X.to(self.model.device)
+        trainEdges, yTrain = self.data.getEdges('train')
+        trainEdges, yTrain = trainEdges.to(self.model.device), yTrain.to(self.model.device)
+        # Start measuring time
+        startTime = datetime.datetime.now()
+
+        # Reset gradients
+        self.model.archit.to(self.model.device)
+        self.model.archit.zero_grad()
+
+        # Obtain the output of the GNN
+        yHatTrain = self.model.archit(trainEdges, adj, X)
+
+        # Compute loss
+        lossValueTrain = self.model.loss(yHatTrain, yTrain.double())
+
+        # Compute gradients
+        lossValueTrain.backward()
+
+        # Optimize
+        self.model.optim.step()
+
+        # Finish measuring time
+        endTime = datetime.datetime.now()
+
+        timeElapsed = abs(endTime - startTime).total_seconds()
+
+        # Compute the accuracy
+        #   Note: Using yHatTrain.data creates a new tensor with the
+        #   same value, but detaches it from the gradient, so that no
+        #   gradient operation is taken into account here.
+        #   (Alternatively, we could use a with torch.no_grad():)
+        costTrain = self.data.evaluate(yHatTrain.data, yTrain)
+
+        return lossValueTrain.item(), costTrain.item(), timeElapsed
+
+    def validationStep(self):
+
+        # Validation:
+        adj = self.data.adj
+        X = self.data.getFeatures()
+        validEdges, yValid = self.data.getEdges('valid')
+
+        # Start measuring time
+        startTime = datetime.datetime.now()
+
+        # Under torch.no_grad() so that the computations carried out
+        # to obtain the validation accuracy are not taken into
+        # account to update the learnable parameters.
+        with torch.no_grad():
+            # Obtain the output of the GNN
+            yHatValid = self.model.archit(validEdges, adj, X)
+
+            # Compute loss
+            lossValueValid = self.model.loss(yHatValid, yValid.double())
+
+            # Finish measuring time
+            endTime = datetime.datetime.now()
+
+            timeElapsed = abs(endTime - startTime).total_seconds()
+
+            # Compute accuracy:
+            costValid = self.data.evaluate(yHatValid, yValid)
+
+        return lossValueValid.item(), costValid.item(), timeElapsed
+
+    def train(self):
+
+        # Get back the training options
+        assert 'trainingOptions' in dir(self)
+        assert 'doLogging' in self.trainingOptions.keys()
+        doLogging = self.trainingOptions['doLogging']
+        assert 'logger' in self.trainingOptions.keys()
+        logger = self.trainingOptions['logger']
+        assert 'doSaveVars' in self.trainingOptions.keys()
+        doSaveVars = self.trainingOptions['doSaveVars']
+        assert 'doPrint' in self.trainingOptions.keys()
+        doPrint = self.trainingOptions['doPrint']
+        assert 'doLearningRateDecay' in self.trainingOptions.keys()
+        doLearningRateDecay = self.trainingOptions['doLearningRateDecay']
+        if doLearningRateDecay:
+            assert 'learningRateDecayRate' in self.trainingOptions.keys()
+            learningRateDecayRate = self.trainingOptions['learningRateDecayRate']
+            assert 'learningRateDecayPeriod' in self.trainingOptions.keys()
+            learningRateDecayPeriod = self.trainingOptions['learningRateDecayPeriod']
+        assert 'doEarlyStopping' in self.trainingOptions.keys()
+        doEarlyStopping = self.trainingOptions['doEarlyStopping']
+        assert 'earlyStoppingLag' in self.trainingOptions.keys()
+        earlyStoppingLag = self.trainingOptions['earlyStoppingLag']
+        assert 'nEpochs' in self.trainingOptions.keys()
+        nEpochs = self.trainingOptions['nEpochs']
+        assert 'graphNo' in self.trainingOptions.keys()
+        graphNo = self.trainingOptions['graphNo']
+        assert 'realizationNo' in self.trainingOptions.keys()
+        realizationNo = self.trainingOptions['realizationNo']
+
+        # Learning rate scheduler:
+        if doLearningRateDecay:
+            learningRateScheduler = torch.optim.lr_scheduler.StepLR(
+                self.model.optim, learningRateDecayPeriod, learningRateDecayRate)
+
+        # Initialize counters (since we give the possibility of early stopping,
+        # we had to drop the 'for' and use a 'while' instead):
+        epoch = 0  # epoch counter
+        lagCount = 0  # lag counter for early stopping
+
+        # Store the training variables
+        lossTrain = []
+        costTrain = []
+        lossValid = []
+        costValid = []
+        timeTrain = []
+        timeValid = []
+
+        while epoch < nEpochs \
+                and (lagCount < earlyStoppingLag or (not doEarlyStopping)):
+            # The condition will be zero (stop), whenever one of the items of
+            # the 'and' is zero. Therefore, we want this to stop only for epoch
+            # counting when we are NOT doing early stopping. This can be
+            # achieved if the second element of the 'and' is always 1 (so that
+            # the first element, the epoch counting, decides). In order to
+            # force the second element to be one whenever there is not early
+            # stopping, we have an or, and force it to one. So, when we are not
+            # doing early stopping, the variable 'not doEarlyStopping' is 1,
+            # and the result of the 'or' is 1 regardless of the lagCount. When
+            # we do early stopping, then the variable 'not doEarlyStopping' is
+            # 0, and the value 1 for the 'or' gate is determined by the lag
+            # count.
+            # ALTERNATIVELY, we could just keep 'and lagCount<earlyStoppingLag'
+            # and be sure that lagCount can only be increased whenever
+            # doEarlyStopping is True. But I somehow figured out that would be
+            # harder to maintain (more parts of the code to check if we are
+            # accidentally increasing lagCount).
+
+            # Learning decay
+            if doLearningRateDecay:
+                learningRateScheduler.step()
+
+                if doPrint:
+                    # All the optimization have the same learning rate, so just
+                    # print one of them
+                    print("Epoch %d, learning rate = %.8f" % (epoch + 1,
+                                                              learningRateScheduler.optim.param_groups[0]['lr']))
+
+            # \\\\\\\
+            # \\\ TRAIN
+            # \\\\\\\
+
+            #train 1 Epoch
+            lossValueTrain, costValueTrain, timeElapsed = \
+                self.trainSSL()
+
+            # Logging values
+            if doLogging:
+                lossTrainTB = lossValueTrain
+                costTrainTB = costValueTrain
+            # Save values
+            lossTrain += [lossValueTrain]
+            costTrain += [costValueTrain]
+            timeTrain += [timeElapsed]
+
+            # Print:
+            if doPrint:
+                if doPrint:
+                    print("\t(E: %2d) %6.4f / %7.4f - %6.4fs" % (
+                        epoch + 1, costValueTrain,
+                        lossValueTrain, timeElapsed),
+                          end=' ')
+                    if graphNo > -1:
+                        print("[%d" % graphNo, end='')
+                        if realizationNo > -1:
+                            print("/%d" % realizationNo,
+                                  end='')
+                        print("]", end='')
+                    print("")
+
+                if doLogging:
+                    logger.scalar_summary(mode='Training',
+                                          epoch=epoch,
+                                          **{'lossTrain': lossTrainTB,
+                                             'costTrain': costTrainTB})
+
+            # \\\\\\\
+            # \\\ VALIDATION
+            # \\\\\\\
+
+
+            lossValueValid, costValueValid, timeElapsed = \
+                self.validationStep()
+
+            # Logging values
+            if doLogging:
+                lossValidTB = lossValueValid
+                costValidTB = costValueValid
+            # Save values
+            lossValid += [lossValueValid]
+            costValid += [costValueValid]
+            timeValid += [timeElapsed]
+
+            # Print:
+            if doPrint:
+                print("\t(E: %2d) %6.4f / %7.4f - %6.4fs" % (
+                    epoch + 1,
+                    costValueValid,
+                    lossValueValid,
+                    timeElapsed), end=' ')
+                print("[VALIDATION", end='')
+                if graphNo > -1:
+                    print(".%d" % graphNo, end='')
+                    if realizationNo > -1:
+                        print("/%d" % realizationNo, end='')
+                print(" (%s)]" % self.model.name)
+
+                if doLogging:
+                    logger.scalar_summary(mode='Validation',
+                                          epoch=epoch,
+                                          **{'lossValid': lossValidTB,
+                                             'costValid': costValidTB})
+
+            # No previous best option, so let's record the first trial
+            # as the best option
+            if epoch == 0:
+                bestScore = costValueValid
+                bestEpoch = epoch
+                # Save this model as the best (so far)
+                self.model.save(label='Best')
+                # Start the counter
+                if doEarlyStopping:
+                    initialBest = True
+            else:
+                thisValidScore = costValueValid
+                if thisValidScore < bestScore:
+                    bestScore = thisValidScore
+                    bestEpoch = epoch
+                    if doPrint:
+                        print("\t=> New best achieved: %.4f" % \
+                              (bestScore))
+                    self.model.save(label='Best')
+                    # Now that we have found a best that is not the
+                    # initial one, we can start counting the lag (if
+                    # needed)
+                    initialBest = False
+                    # If we achieved a new best, then we need to reset
+                    # the lag count.
+                    if doEarlyStopping:
+                        lagCount = 0
+                # If we didn't achieve a new best, increase the lag
+                # count.
+                # Unless it was the initial best, in which case we
+                # haven't found any best yet, so we shouldn't be doing
+                # the early stopping count.
+                elif doEarlyStopping and not initialBest:
+                    lagCount += 1
+
+            # \\\\\\\
+            # \\\ END OF EPOCH:
+            # \\\\\\\
+
+            # \\\ Increase epoch count:
+            epoch += 1
+
+        # \\\ Save models:
+        self.model.save(label='Last')
+
+        #################
+        # TRAINING OVER #
+        #################
+
+        # We convert the lists into np.arrays
+        lossTrain = np.array(lossTrain)
+        costTrain = np.array(costTrain)
+        lossValid = np.array(lossValid)
+        costValid = np.array(costValid)
+        # And we would like to save all the relevant information from
+        # training
+        trainVars = {'nEpochs': nEpochs,
+                     'lossTrain': lossTrain,
+                     'costTrain': costTrain,
+                     'lossValid': lossValid,
+                     'costValid': costValid
+                     }
+
+        if doSaveVars:
+            saveDirVars = os.path.join(self.model.saveDir, 'trainVars')
+            if not os.path.exists(saveDirVars):
+                os.makedirs(saveDirVars)
+            pathToFile = os.path.join(saveDirVars,
+                                      self.model.name + 'trainVars.pkl')
+            with open(pathToFile, 'wb') as trainVarsFile:
+                pickle.dump(trainVars, trainVarsFile)
+
+        # Now, if we didn't do any training (i.e. nEpochs = 0), then the last is
+        # also the best.
+        if nEpochs == 0:
+            self.model.save(label='Best')
+            self.model.save(label='Last')
+            if doPrint:
+                print("WARNING: No training. Best and Last models are the same.")
+
+        # After training is done, reload best model before proceeding to
+        # evaluation:
+        self.model.load(label='Best')
+
+        # \\\ Print out best:
+        if doPrint and nEpochs > 0:
+            print("=> Best validation achieved (E: %d): %.4f" % (
+                bestEpoch + 1, bestScore))
+
+        return trainVars
+
 class TrainerFlocking(Trainer):
     """
     Trainer: trains flocking models, following the appropriate evaluation of
