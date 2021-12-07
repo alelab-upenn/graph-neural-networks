@@ -4206,4 +4206,120 @@ class EdgeGatedHiddenState(nn.Module):
             reprString += "GSO stored"
         else:
             reprString += "no GSO stored"
-        return reprString    
+        return reprString
+
+class GraphDisenConv(nn.Module):
+    """
+    GraphDisenConv Creates a (linear) layer that applies a graph filter with
+    disentanglement by channel, and aggregate other neighbors' attention
+
+    Initialization:
+
+        GraphDisenConv(in_features, out_features, channels,
+            filter_taps, bias=True)
+
+        Inputs:
+            in_features (int): number of input features (each feature is a graph
+                signal)
+            out_features (int): number of output features (each feature is a
+                graph signal)
+            channels (int): number of channels(latent factors)
+            filter_taps (int): number of filter taps (this model consider filter_tabs-hop neighbors)
+            bias (bool): add bias vector (one bias per feature) after graph
+                filtering
+
+        Output:
+            torch.nn.Module for a graph filtering layer (also known as graph
+            convolutional layer).
+
+    Forward call:
+
+        y = GraphDisenConv(adj, x)
+
+        Inputs:
+            adj (torch.tensor): adjacency matrix; shape:
+                number_nodes X number_nodes
+            x (torch.tensor): input data; shape:
+                number_nodes X in_features
+
+        Outputs:
+            y (torch.tensor): output; shape:
+                number_nodes X out_features(= channels * channelsDim )
+    """
+
+    def __init__(self, I, O, C, K=1, bias=True):
+        # I: Input dimension
+        # O: Output dimension
+        # C: Number of channels
+        # K: Number of filter taps
+
+        # Initialize parent
+        super().__init__()
+        # Save parameters:
+        self.I = I
+        self.O = O
+        self.C = C
+        self.Cdim = int(O / C)
+        self.K = K
+        self.bias = bias
+        # Create parameters:
+        self.weightList = []
+        for c in range(C):
+            self.weightList.append(nn.parameter.Parameter(torch.Tensor(I, self.Cdim)))
+        if bias:
+            self.biasList = []
+            for c in range(C):
+                self.biasList.append(nn.parameter.Parameter(torch.Tensor(1, self.Cdim)))
+        else:
+            self.register_parameter('bias', None)
+        # Initialize parameters
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        # Taken from _ConvNd initialization of parameters:
+        for c in range(self.C):
+            self.weightList[c].data.normal_(0, 1)
+            if self.bias is not None:
+                self.biasList[c].data.normal_(0, 1)
+
+    def forward(self, adj, X):
+        # shape of adj : numberNodes X numberNodes
+        # shape of x: numberNodes x dimInFeatures
+        disenFeatures = []
+        for c in range(self.C):
+            disenX = torch.matmul(X, self.weightList[c])
+            if self.bias:
+                disenX += self.biasList[c]
+            disenX = nn.functional.normalize(disenX, dim = 1)
+            disenFeatures.append(disenX)
+        # So far, disenFeatures is of shape numberChannels x numberNodes x channelDim
+        # And we want to aggregate neighbors' effect
+        outFeatures = disenFeatures
+        for i in range(self.K):
+            attentions = []
+            for c in range(self.C):
+                disenX = disenFeatures[c]
+                attentions.append(self.getAttention(adj, disenX))
+            attentions = torch.stack(attentions, dim = 2)
+            attentions = nn.functional.softmax(attentions, dim = 2)
+            # shape of attnetions : numberNodes X numberNodes X numberChannels
+            adjExpand = adj.unsqueeze(dim = 2).repeat(1, 1, self.C)
+            zeroAttentions = torch.zeros_like(attentions)
+            attentions = torch.where(adjExpand > 0, attentions, zeroAttentions)
+            for c in range(self.C):
+                feature = outFeatures[c]
+                attention = attentions[:, :, c].squeeze()
+                # Aggregate neighbors' feature
+                outFeatures[c] = nn.functional.normalize(feature + torch.mm(attention, feature), dim = 1)
+        out = torch.hstack(outFeatures)
+        return out
+
+    def getAttention(self, adj, disenX):
+        # Get attention between node and neighbors
+        # First, get the score matrix
+        attention = torch.mm(disenX, disenX.t())
+        # Second, remove score about not neighbors
+        zeroAttetnion = torch.zeros_like(attention)
+        attention = torch.where(adj == 1, attention, zeroAttetnion)
+
+        return attention

@@ -4982,4 +4982,133 @@ class GatedGraphRecurrentNN(nn.Module):
         # Add the GSO for each graph filter
         self.hiddenState.addGSO(self.S)
         self.outputState.addGSO(self.S)
-        
+
+
+class DisentangledGCN(nn.Module):
+# Geonwoo Ko, kw1022222@naver.com, 2021/11/29
+    """
+    DisentangledGCN: implements the disentangled graph convolutional network architecture for link prediction
+    >> Obs.: GSO and coarsening are not yet implemented.
+        It was written with reference to https://github.com/Jerry2398/DisenGCN.
+
+    Initialization:
+        DisentangledGCN(dimNodeFeatures, nFilterTaps,
+                        nChannel, bias, # Graph Filtering
+                        nonlinearity, # Nonlinearity
+                        )
+        Input:
+            /** Graph convolutional layers **/
+            dimNodeSignals (list of int): dimension of the signals at each layer
+            (i.e. number of features at each node, or size of the vector
+            supported at each node)
+            nFilterTaps (list of int): number of filter taps on each layer
+                (i.e. nFilterTaps is the extent of neighborhoods that are
+                 reached, for example K=1 is info from the 1-hop neighbors)
+            nChannel (list of int): number of channel on each layer's output signal
+            dimChannelSignals (list of int) : dimension of the signals on each channel
+            bias (bool): include bias after graph filter on every layer
+            >> Obs.: After disentangled, the output dimension of each
+                filtering layer is nChannel * dimChanelSignals
+
+            /** Activation function **/
+            nonlinearity (torch.nn): module from torch.nn non-linear activations
+        Output:
+            nn.Module with a Disentangled GCN architecture with the above specified
+            characteristics.
+    Forward call:
+        DisentangledGCN(edge, adj ,x)
+        Input:
+            edge (torch.tensor): input edge of graph
+                numberEdges X 2
+            adj (torch.tensor): adjacency matrix of graph
+                numberNodes X numberNodes
+            x (torch.tensor): input data of shape
+                numberNodes X dimNodeFeature
+        Output:
+            y (torch.tensor): probability of having edge;
+                shape: numberEdges
+    """
+
+    def __init__(self,
+                 # Graph filtering
+                 dimNodeFeatures, nFilterTaps,
+                 nChannel, bias,
+                 # Nonlinearity
+                 nonlinearity,
+                 # MLP in the end
+                 dimLayersMLP,
+                 ):
+        # Initialize parent:
+        super().__init__()
+
+        # Store the values (using the notation in the paper):
+        self.L = len(nFilterTaps)  # Number of graph filtering layers
+        self.F = dimNodeFeatures # Features
+        self.K = nFilterTaps  # Filter taps
+        self.C = nChannel   # Number of channels
+        self.bias = bias  # Boolean
+        # Store the rest of the variables
+        self.sigma = nonlinearity
+        self.dimLayersMLP = dimLayersMLP
+        # And now, we're finally ready to create the architecture:
+        # \\\ Graph filtering layers \\\
+        # OBS.: We could join this for with the one before, but we keep separate
+        # for clarity of code.
+        gdcl = []  # Graph Disentangled Convolutional Layers
+
+        for l in range(self.L):
+            # \\ Graph Disentangled Convolution stage:
+            gdcl.append(gml.GraphDisenConv(self.F[l], self.F[l+1], self.C[l],
+                                             self.K[l], self.bias))
+            # \\ Nonlinearity
+            gdcl.append(self.sigma())
+            
+        # And now feed them into the sequential
+        self.GDCL = nn.Sequential(*gdcl)  # Graph Disentangled Convolutional Layer
+        # \\\ MLP (Fully Connected Layers) \\\
+        fc = []
+        if len(self.dimLayersMLP) > 0:  # Maybe we don't want to MLP anything
+            # The first layer has to connect whatever was left of the graph
+            # signal, flattened.
+            dimInputMLP = 2 * self.F[-1]
+            # the Input vector has 2 * F[-1] dimension (because of source node
+            # feature + target node feature)
+            fc.append(nn.Linear(dimInputMLP, dimLayersMLP[0], bias=self.bias))
+            # The last linear layer cannot be followed by nonlinearity, because
+            # usually, this nonlinearity depends on the loss function (for
+            # instance, if we have a classification problem, this nonlinearity
+            # is already handled by the cross entropy loss or we add a softmax.)
+            for l in range(len(dimLayersMLP) - 1):
+                # Add the nonlinearity because there's another linear layer
+                # coming
+                fc.append(self.sigma())
+                # And add the linear layer
+                fc.append(nn.Linear(dimLayersMLP[l], dimLayersMLP[l + 1],
+                                    bias=self.bias))
+            # Add the conversion from score to probability
+            fc.append(nn.Sigmoid())
+        # And we're done
+        self.MLP = nn.Sequential(*fc)
+        # so we finally have the architecture.
+
+
+    def forward(self, edge, adj, x):
+        # Most of the times, we just need the actual, last output. But, since in
+        # this case, we also want to compare with the output of the GNN itself,
+        # we need to create this other forward funciton that takes both outputs
+        # (the GNN and the MLP) and returns only the MLP output in the proper
+        # forward function.
+        # Train disentangled feature
+        out = self.GDCL[0](adj, x)
+        out = self.GDCL[1](out)
+        for l in range(1, self.L):
+            out = self.GDCL[2*l](adj, out)
+            out = self.GDCL[2*l+1](out)
+        # Get embedding of edge sources
+        source = edge[:, 0]
+        target = edge[:, 1]
+        concatFeature = torch.cat([out[source], out[target]], dim = 1)
+        # Get probabilty of each node has link
+        output = self.MLP(concatFeature).squeeze()
+        return output
+
