@@ -1068,9 +1068,9 @@ def LSIGF_DB(h, S, x, b=None):
         zeroRow = torch.zeros(B, 1, E, G, N, dtype=x.dtype,device=x.device)
         x = torch.cat((zeroRow, x), dim = 1)
         # And now we multiply with S
-        x = torch.matmul(x, S)
+        aggregatedX = torch.matmul(x, S)
         # Add the dimension along K
-        xS = x.reshape(B, T, 1, E, G, N)
+        xS = aggregatedX.reshape(B, T, 1, E, G, N)
         # And concatenate it with z
         z = torch.cat((z, xS), dim = 2)
         
